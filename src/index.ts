@@ -11,6 +11,8 @@ import {
 import {
   c,
   formatBytes,
+  formatTokens,
+  formatDurationShort,
   truncate,
   formatDate,
   formatDuration,
@@ -25,21 +27,31 @@ import {
 const args = process.argv.slice(2);
 const command = args[0] ?? "list";
 
-function getFlag(name: string): string | undefined {
-  const idx = args.indexOf(`--${name}`);
-  if (idx === -1) return undefined;
-  return args[idx + 1];
+function getFlag(long: string, short?: string): string | undefined {
+  const longIdx = args.indexOf(`--${long}`);
+  if (longIdx !== -1) return args[longIdx + 1];
+  if (short) {
+    const shortIdx = args.indexOf(`-${short}`);
+    if (shortIdx !== -1) return args[shortIdx + 1];
+  }
+  return undefined;
 }
 
-function hasFlag(name: string): boolean {
-  return args.includes(`--${name}`);
+function hasFlag(long: string, short?: string): boolean {
+  if (args.includes(`--${long}`)) return true;
+  if (short && args.includes(`-${short}`)) return true;
+  return false;
 }
+
+const verbose = hasFlag("verbose", "v");
 
 // ── Commands ─────────────────────────────────────────────────
 
 async function cmdList() {
-  const projectFilter = getFlag("project");
-  const sortBy = getFlag("sort") ?? "date";
+  const projectFilter = getFlag("project", "p");
+  const sortBy = getFlag("sort", "s") ?? "date";
+  const limitStr = getFlag("limit", "n");
+  const limit = limitStr ? parseInt(limitStr, 10) : undefined;
 
   console.log(`${c.cyan}${c.bold}Claude Session Manager${c.reset}\n`);
   console.log(`${c.dim}Loading sessions...${c.reset}`);
@@ -55,6 +67,16 @@ async function cmdList() {
 
   if (sortBy === "size") {
     sessions.sort((a, b) => b.totalSizeBytes - a.totalSizeBytes);
+  } else if (sortBy === "tokens") {
+    sessions.sort((a, b) => {
+      const aT = (a.meta?.input_tokens ?? 0) + (a.meta?.output_tokens ?? 0);
+      const bT = (b.meta?.input_tokens ?? 0) + (b.meta?.output_tokens ?? 0);
+      return bT - aT;
+    });
+  } else if (sortBy === "duration") {
+    sessions.sort(
+      (a, b) => (b.meta?.duration_minutes ?? 0) - (a.meta?.duration_minutes ?? 0)
+    );
   } else {
     sessions.sort(
       (a, b) =>
@@ -68,27 +90,185 @@ async function cmdList() {
     return;
   }
 
+  // Compute totals before limiting
+  const totalCount = sessions.length;
   const totalSize = sessions.reduce((a, s) => a + s.totalSizeBytes, 0);
-  console.log(
-    `${c.dim}Found ${c.white}${sessions.length}${c.dim} sessions (${formatBytes(totalSize)} total)${c.reset}\n`
+  const totalTokens = sessions.reduce(
+    (a, s) => a + (s.meta?.input_tokens ?? 0) + (s.meta?.output_tokens ?? 0),
+    0
+  );
+  const totalDuration = sessions.reduce(
+    (a, s) => a + (s.meta?.duration_minutes ?? 0),
+    0
   );
 
-  const headers = ["Project", "Session", "Date", "Msgs", "Size"];
-  const colWidths = [22, 42, 12, 6, 10];
+  console.log(
+    `${c.dim}Found ${c.white}${totalCount}${c.dim} sessions (${formatBytes(totalSize)} total)${c.reset}\n`
+  );
 
-  const rows = sessions.map((s) => [
-    truncate(projectName(s.entry.projectPath), colWidths[0]!),
-    truncate(getSessionLabel(s), colWidths[1]!),
-    relativeDate(s.entry.modified),
-    String(s.entry.messageCount),
-    formatBytes(s.totalSizeBytes),
-  ]);
+  const displayed = limit ? sessions.slice(0, limit) : sessions;
 
-  printTable(headers, rows, colWidths);
+  if (verbose) {
+    printVerboseList(displayed);
+  } else {
+    const headers = ["ID", "Name", "Project", "Session", "Branch", "Date", "Dur", "Msgs", "Tokens", "Size"];
+    const colWidths = [36, 16, 14, 28, 12, 9, 5, 5, 7, 7];
+    const aligns: ("l" | "r")[] = ["l", "l", "l", "l", "l", "l", "r", "r", "r", "r"];
+
+    const rows = displayed.map((s) => {
+      const tokens = (s.meta?.input_tokens ?? 0) + (s.meta?.output_tokens ?? 0);
+      return [
+        s.entry.sessionId,
+        truncate(s.entry.customTitle || "-", colWidths[1]!),
+        truncate(projectName(s.entry.projectPath), colWidths[2]!),
+        truncate(getSessionLabel(s), colWidths[3]!),
+        truncate(s.entry.gitBranch ?? "-", colWidths[4]!),
+        relativeDate(s.entry.modified),
+        s.meta?.duration_minutes != null
+          ? formatDurationShort(s.meta.duration_minutes)
+          : "-",
+        String(s.entry.messageCount),
+        tokens > 0 ? formatTokens(tokens) : "-",
+        formatBytes(s.totalSizeBytes),
+      ];
+    });
+
+    printTable(headers, rows, colWidths, aligns);
+  }
+
+  if (limit && limit < totalCount) {
+    console.log(
+      `\n${c.dim}Showing ${displayed.length} of ${totalCount} sessions${c.reset}`
+    );
+  }
+
+  const totalHours = Math.round(totalDuration / 60);
+  console.log(
+    `\n${c.dim}${totalCount} sessions \u00b7 ${formatBytes(totalSize)} \u00b7 ${formatTokens(totalTokens)} tokens \u00b7 ${totalHours}h total${c.reset}`
+  );
+}
+
+function printVerboseList(sessions: EnrichedSession[]) {
+  for (const s of sessions) {
+    const { entry, meta, facets, totalSizeBytes } = s;
+    const sep = c.dim + "\u2500".repeat(80) + c.reset;
+    console.log(sep);
+
+    // Line 1: Session ID
+    console.log(`  ${c.cyan}${c.bold}${entry.sessionId}${c.reset}`);
+
+    // Line 2: Name & Project
+    const name = entry.customTitle || "-";
+    console.log(
+      `  ${c.bold}Name:${c.reset} ${c.white}${name}${c.reset}` +
+      `     ${c.bold}Project:${c.reset} ${entry.projectPath}`
+    );
+
+    // Line 3: Label & Branch
+    const label = getSessionLabel(s);
+    console.log(
+      `  ${c.bold}Label:${c.reset} ${c.green}${truncate(label, 60)}${c.reset}` +
+      (entry.gitBranch ? `     ${c.bold}Branch:${c.reset} ${entry.gitBranch}` : "")
+    );
+
+    // Line 4: Dates
+    console.log(
+      `  ${c.bold}Created:${c.reset} ${formatDate(entry.created)}` +
+      `     ${c.bold}Modified:${c.reset} ${formatDate(entry.modified)} (${relativeDate(entry.modified)})` +
+      (meta?.duration_minutes != null
+        ? `     ${c.bold}Duration:${c.reset} ${formatDuration(meta.duration_minutes)}`
+        : "")
+    );
+
+    // Line 5: Messages, Size, Tokens
+    const userMsgs = meta?.user_message_count ?? "?";
+    const asstMsgs = meta?.assistant_message_count ?? "?";
+    const inTok = meta?.input_tokens ?? 0;
+    const outTok = meta?.output_tokens ?? 0;
+    console.log(
+      `  ${c.bold}Messages:${c.reset} ${entry.messageCount} (${userMsgs} user / ${asstMsgs} asst)` +
+      `     ${c.bold}Size:${c.reset} ${formatBytes(totalSizeBytes)}` +
+      (inTok + outTok > 0
+        ? `     ${c.bold}Tokens:${c.reset} ${formatTokens(inTok)} in / ${formatTokens(outTok)} out`
+        : "")
+    );
+
+    // Line 6: Code changes (if meta available)
+    if (meta) {
+      const parts: string[] = [];
+      if (meta.files_modified > 0)
+        parts.push(`${c.bold}Files:${c.reset} ${meta.files_modified} modified`);
+      if (meta.lines_added > 0 || meta.lines_removed > 0)
+        parts.push(`${c.bold}Lines:${c.reset} ${c.green}+${meta.lines_added}${c.reset} / ${c.red}-${meta.lines_removed}${c.reset}`);
+      if (meta.git_commits)
+        parts.push(`${c.bold}Git:${c.reset} ${meta.git_commits} commit${meta.git_commits !== 1 ? "s" : ""}${meta.git_pushes ? `, ${meta.git_pushes} push${meta.git_pushes !== 1 ? "es" : ""}` : ""}`);
+      if (meta.user_interruptions)
+        parts.push(`${c.bold}Interruptions:${c.reset} ${meta.user_interruptions}`);
+      if (meta.tool_errors)
+        parts.push(`${c.bold}Errors:${c.reset} ${meta.tool_errors}`);
+      if (parts.length > 0) console.log(`  ${parts.join("     ")}`);
+
+      // Tools
+      if (Object.keys(meta.tool_counts).length > 0) {
+        const tools = Object.entries(meta.tool_counts)
+          .sort((a, b) => b[1] - a[1])
+          .map(([k, v]) => `${k}(${v})`)
+          .join(", ");
+        console.log(`  ${c.bold}Tools:${c.reset} ${tools}`);
+      }
+
+      // Languages
+      if (Object.keys(meta.languages).length > 0) {
+        const langs = Object.entries(meta.languages)
+          .sort((a, b) => b[1] - a[1])
+          .map(([k, v]) => `${k}(${v})`)
+          .join(", ");
+        console.log(`  ${c.bold}Languages:${c.reset} ${langs}`);
+      }
+
+      // Feature flags
+      const features: string[] = [];
+      if (meta.uses_task_agent) features.push("Task Agent");
+      if (meta.uses_mcp) features.push("MCP");
+      if (meta.uses_web_search) features.push("Web Search");
+      if (meta.uses_web_fetch) features.push("Web Fetch");
+      if (features.length > 0)
+        console.log(`  ${c.bold}Features:${c.reset} ${features.join(", ")}`);
+    }
+
+    // Facets
+    if (facets) {
+      const facetParts: string[] = [];
+      if (facets.session_type)
+        facetParts.push(`${c.bold}Type:${c.reset} ${facets.session_type}`);
+      if (facets.outcome)
+        facetParts.push(`${c.bold}Outcome:${c.reset} ${facets.outcome}`);
+      if (facets.claude_helpfulness)
+        facetParts.push(`${c.bold}Helpfulness:${c.reset} ${facets.claude_helpfulness}`);
+      if (facets.primary_success)
+        facetParts.push(`${c.bold}Success:${c.reset} ${facets.primary_success}`);
+      if (facetParts.length > 0) console.log(`  ${facetParts.join("     ")}`);
+
+      if (facets.brief_summary)
+        console.log(`  ${c.bold}Summary:${c.reset} ${facets.brief_summary}`);
+      if (facets.underlying_goal)
+        console.log(`  ${c.bold}Goal:${c.reset} ${facets.underlying_goal}`);
+      if (facets.friction_detail)
+        console.log(`  ${c.bold}Friction:${c.reset} ${c.yellow}${facets.friction_detail}${c.reset}`);
+    }
+
+    // First prompt
+    if (entry.firstPrompt && entry.firstPrompt !== "No prompt") {
+      const cleaned = truncate(entry.firstPrompt.replace(/\n/g, " "), 120);
+      console.log(`  ${c.bold}First Prompt:${c.reset} ${c.dim}${cleaned}${c.reset}`);
+    }
+
+    console.log();
+  }
 }
 
 async function cmdFind() {
-  const query = args.slice(1).filter((a) => !a.startsWith("--")).join(" ");
+  const query = args.slice(1).filter((a) => !a.startsWith("-")).join(" ");
 
   if (!query) {
     console.log(`${c.red}Usage: csm find <search query>${c.reset}`);
@@ -112,21 +292,34 @@ async function cmdFind() {
     `${c.dim}Found ${c.white}${results.length}${c.dim} matching session(s)${c.reset}\n`
   );
 
-  for (const s of results.slice(0, 15)) {
-    const label = getSessionLabel(s);
-    const proj = projectName(s.entry.projectPath);
-    console.log(
-      `  ${c.green}${label}${c.reset}`
-    );
-    console.log(
-      `  ${c.dim}${proj} | ${relativeDate(s.entry.modified)} | ${s.entry.messageCount} msgs | ${formatBytes(s.totalSizeBytes)}${c.reset}`
-    );
-    if (s.facets?.brief_summary) {
-      console.log(`  ${c.dim}${truncate(s.facets.brief_summary, 80)}${c.reset}`);
+  if (verbose) {
+    printVerboseList(results.slice(0, 15));
+  } else {
+    for (const s of results.slice(0, 15)) {
+      const label = getSessionLabel(s);
+      const proj = projectName(s.entry.projectPath);
+      const tokens = (s.meta?.input_tokens ?? 0) + (s.meta?.output_tokens ?? 0);
+      const namePart = s.entry.customTitle
+        ? `  ${c.magenta}[${s.entry.customTitle}]${c.reset}`
+        : "";
+      console.log(
+        `  ${c.cyan}${s.entry.sessionId}${c.reset}${namePart}  ${c.green}${label}${c.reset}`
+      );
+      const pad = " ".repeat(38);
+      const details = [
+        proj,
+        relativeDate(s.entry.modified),
+        `${s.entry.messageCount} msgs`,
+        formatBytes(s.totalSizeBytes),
+        tokens > 0 ? `${formatTokens(tokens)} tokens` : null,
+        s.entry.gitBranch ? `${s.entry.gitBranch}` : null,
+      ].filter(Boolean).join(" | ");
+      console.log(`${pad}${c.dim}${details}${c.reset}`);
+      if (s.facets?.brief_summary) {
+        console.log(`${pad}${c.dim}${truncate(s.facets.brief_summary, 80)}${c.reset}`);
+      }
+      console.log();
     }
-    console.log(
-      `  ${c.dim}ID: ${s.entry.sessionId}${c.reset}\n`
-    );
   }
 
   if (results.length > 15) {
@@ -160,8 +353,8 @@ async function cmdInfo() {
   const label = getSessionLabel(session);
   const rows: [string, string][] = [
     ["ID", entry.sessionId],
+    ["Name", entry.customTitle || "-"],
     ["Label", label],
-    ["Title", entry.customTitle || "-"],
     ["Summary", entry.summary || "-"],
     ["First Prompt", truncate(entry.firstPrompt, 70)],
     ["Project", entry.projectPath],
@@ -183,23 +376,77 @@ async function cmdInfo() {
       ["Lines +/-", `${c.green}+${meta.lines_added}${c.reset} / ${c.red}-${meta.lines_removed}${c.reset}`],
     );
 
+    if (meta.git_commits != null)
+      rows.push(["Git Commits", String(meta.git_commits)]);
+    if (meta.git_pushes != null)
+      rows.push(["Git Pushes", String(meta.git_pushes)]);
+
     if (Object.keys(meta.tool_counts).length > 0) {
       const tools = Object.entries(meta.tool_counts)
         .sort((a, b) => b[1] - a[1])
         .map(([k, v]) => `${k}(${v})`)
         .join(", ");
-      rows.push(["Tools Used", truncate(tools, 60)]);
+      rows.push(["Tools Used", tools]);
     }
+
+    if (Object.keys(meta.languages).length > 0) {
+      const langs = Object.entries(meta.languages)
+        .sort((a, b) => b[1] - a[1])
+        .map(([k, v]) => `${k}(${v})`)
+        .join(", ");
+      rows.push(["Languages", langs]);
+    }
+
+    if (meta.user_interruptions != null)
+      rows.push(["Interruptions", String(meta.user_interruptions)]);
+    if (meta.tool_errors != null)
+      rows.push(["Tool Errors", String(meta.tool_errors)]);
+
+    if (meta.tool_error_categories && Object.keys(meta.tool_error_categories).length > 0) {
+      const cats = Object.entries(meta.tool_error_categories)
+        .map(([k, v]) => `${k}(${v})`)
+        .join(", ");
+      rows.push(["Error Types", cats]);
+    }
+
+    // Feature flags
+    const features: string[] = [];
+    if (meta.uses_task_agent) features.push("Task Agent");
+    if (meta.uses_mcp) features.push("MCP");
+    if (meta.uses_web_search) features.push("Web Search");
+    if (meta.uses_web_fetch) features.push("Web Fetch");
+    if (features.length > 0)
+      rows.push(["Features", features.join(", ")]);
   }
 
   if (facets) {
     if (facets.brief_summary)
-      rows.push(["Brief Summary", truncate(facets.brief_summary, 70)]);
+      rows.push(["Brief Summary", facets.brief_summary]);
+    if (facets.underlying_goal)
+      rows.push(["Goal", facets.underlying_goal]);
     if (facets.session_type)
       rows.push(["Session Type", facets.session_type]);
     if (facets.outcome) rows.push(["Outcome", facets.outcome]);
     if (facets.claude_helpfulness)
       rows.push(["Helpfulness", facets.claude_helpfulness]);
+    if (facets.primary_success)
+      rows.push(["Success", facets.primary_success]);
+    if (facets.friction_detail)
+      rows.push(["Friction", facets.friction_detail]);
+
+    if (facets.goal_categories && Object.keys(facets.goal_categories).length > 0) {
+      const cats = Object.entries(facets.goal_categories)
+        .map(([k, v]) => `${k}(${v})`)
+        .join(", ");
+      rows.push(["Goal Categories", cats]);
+    }
+
+    if (facets.friction_counts && Object.keys(facets.friction_counts).length > 0) {
+      const fc = Object.entries(facets.friction_counts)
+        .map(([k, v]) => `${k}(${v})`)
+        .join(", ");
+      rows.push(["Friction Types", fc]);
+    }
   }
 
   for (const [label, value] of rows) {
@@ -343,29 +590,41 @@ ${c.cyan}${c.bold}csm${c.reset} - Claude Session Manager
 ${c.bold}USAGE${c.reset}
   csm [command] [options]
 
+${c.bold}GLOBAL OPTIONS${c.reset}
+  -v, --verbose         Show detailed output with all available data
+
 ${c.bold}COMMANDS${c.reset}
-  ${c.green}list${c.reset}              List all sessions (default)
-    --project <name>  Filter by project name
-    --sort size|date  Sort order (default: date)
+  ${c.green}list${c.reset}, ${c.green}l${c.reset}              List all sessions (default)
+    -p, --project <name>  Filter by project name
+    -s, --sort <key>      Sort by: date, size, tokens, duration
+    -n, --limit <N>       Show only the first N sessions
+    -v, --verbose         Card-style output with full details
 
-  ${c.green}find${c.reset} <query>       Search sessions by description
+  ${c.green}find${c.reset}, ${c.green}f${c.reset} <query>       Search sessions by description
     Searches summaries, prompts, goals, and branch names
+    -v, --verbose         Card-style output with full details
 
-  ${c.green}info${c.reset} <session-id>  Show detailed session information
-    Accepts partial session IDs
+  ${c.green}info${c.reset}, ${c.green}i${c.reset} <session-id>  Show detailed session information
+    Accepts partial session IDs (8 chars is enough)
 
-  ${c.green}clean${c.reset}             Interactively select and remove sessions
+  ${c.green}clean${c.reset}, ${c.green}c${c.reset}             Interactively select and remove sessions
     --older-than <days>  Pre-select sessions older than N days
     --dry-run            Preview without deleting
 
   ${c.green}help${c.reset}              Show this help message
 
 ${c.bold}EXAMPLES${c.reset}
-  csm                           List all sessions
-  csm list --sort size          List sessions by size
-  csm find "expo upgrade"       Find sessions about expo upgrades
-  csm info dfde9d19             Show session details
-  csm clean --older-than 30     Clean sessions older than 30 days
+  csm                           List all sessions (full IDs & names)
+  csm l -v                      List with verbose card output
+  csm l -s size -n 20           Top 20 sessions by size
+  csm l -s tokens               Sort by token usage
+  csm f "expo upgrade"          Find sessions about expo upgrades
+  csm f "expo upgrade" -v       Find with verbose detail cards
+  csm i dfde9d19                Show session details (partial ID)
+  csm c --older-than 30         Clean sessions older than 30 days
+
+${c.bold}SETUP${c.reset}
+  bun run setup                 Install 'csm' globally
 `);
 }
 
@@ -373,19 +632,23 @@ ${c.bold}EXAMPLES${c.reset}
 
 switch (command) {
   case "list":
+  case "l":
     await cmdList();
     break;
   case "find":
   case "search":
+  case "f":
     await cmdFind();
     break;
   case "info":
   case "show":
+  case "i":
     await cmdInfo();
     break;
   case "clean":
   case "remove":
   case "delete":
+  case "c":
     await cmdClean();
     break;
   case "help":

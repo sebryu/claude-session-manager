@@ -7,7 +7,8 @@
     "csm": "src/index.ts"
   },
   "scripts": {
-    "start": "bun run src/index.ts"
+    "start": "bun run src/index.ts",
+    "setup": "chmod +x src/index.ts && bun link"
   },
   "devDependencies": {
     "@types/bun": "latest"

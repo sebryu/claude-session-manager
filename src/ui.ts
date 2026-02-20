@@ -21,6 +21,13 @@ export function formatBytes(bytes: number): string {
   return `${val.toFixed(i === 0 ? 0 : 1)} ${units[i]!}`;
 }
 
+export function formatTokens(tokens: number): string {
+  if (tokens === 0) return "-";
+  if (tokens < 1000) return String(tokens);
+  if (tokens < 1_000_000) return `${(tokens / 1000).toFixed(1)}K`;
+  return `${(tokens / 1_000_000).toFixed(1)}M`;
+}
+
 export function truncate(str: string, max: number): string {
   if (str.length <= max) return str;
   return str.slice(0, max - 1) + "\u2026";
@@ -40,6 +47,13 @@ export function formatDuration(minutes: number): string {
   const h = Math.floor(minutes / 60);
   const m = minutes % 60;
   return m > 0 ? `${h}h ${m}m` : `${h}h`;
+}
+
+export function formatDurationShort(minutes: number): string {
+  if (minutes < 60) return `${minutes}m`;
+  const h = Math.floor(minutes / 60);
+  if (h < 24) return `${h}h`;
+  return `${Math.floor(h / 24)}d`;
 }
 
 export function relativeDate(iso: string): string {
@@ -67,18 +81,27 @@ export function padLeft(str: string, width: number): string {
 export function printTable(
   headers: string[],
   rows: string[][],
-  colWidths: number[]
+  colWidths: number[],
+  aligns?: ("l" | "r")[]
 ) {
   // Header
   const headerLine = headers
-    .map((h, i) => `${c.bold}${padRight(h, colWidths[i]!)}${c.reset}`)
+    .map((h, i) => {
+      const padFn = aligns?.[i] === "r" ? padLeft : padRight;
+      return `${c.bold}${padFn(h, colWidths[i]!)}${c.reset}`;
+    })
     .join("  ");
   console.log(headerLine);
   console.log(c.dim + "\u2500".repeat(colWidths.reduce((a, b) => a + b + 2, -2)) + c.reset);
 
   // Rows
   for (const row of rows) {
-    const line = row.map((cell, i) => padRight(cell, colWidths[i]!)).join("  ");
+    const line = row
+      .map((cell, i) => {
+        const padFn = aligns?.[i] === "r" ? padLeft : padRight;
+        return padFn(cell, colWidths[i]!);
+      })
+      .join("  ");
     console.log(line);
   }
 }

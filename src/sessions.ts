@@ -41,6 +41,19 @@ export interface SessionMeta {
   lines_added: number;
   lines_removed: number;
   files_modified: number;
+  git_commits?: number;
+  git_pushes?: number;
+  first_prompt?: string;
+  summary?: string;
+  user_interruptions?: number;
+  tool_errors?: number;
+  tool_error_categories?: Record<string, number>;
+  uses_task_agent?: boolean;
+  uses_mcp?: boolean;
+  uses_web_search?: boolean;
+  uses_web_fetch?: boolean;
+  user_response_times?: number[];
+  message_hours?: number[];
 }
 
 export interface SessionFacets {
@@ -49,6 +62,11 @@ export interface SessionFacets {
   session_type?: string;
   brief_summary?: string;
   claude_helpfulness?: string;
+  goal_categories?: Record<string, number>;
+  friction_counts?: Record<string, number>;
+  friction_detail?: string;
+  primary_success?: string;
+  user_satisfaction_counts?: Record<string, number>;
 }
 
 export interface EnrichedSession {
