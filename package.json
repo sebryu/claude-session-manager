@@ -1,0 +1,21 @@
+{
+  "name": "claude-session-manager",
+  "module": "src/index.ts",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "csm": "src/index.ts"
+  },
+  "scripts": {
+    "start": "bun run src/index.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@inquirer/prompts": "^8.2.1"
+  }
+}
