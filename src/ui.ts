@@ -57,11 +57,23 @@ export function formatDurationShort(minutes: number): string {
 }
 
 export function relativeDate(iso: string): string {
-  const now = Date.now();
-  const then = new Date(iso).getTime();
-  const days = Math.floor((now - then) / (1000 * 60 * 60 * 24));
-  if (days === 0) return "today";
-  if (days === 1) return "yesterday";
+  const d = new Date(iso);
+  const now = new Date();
+  const diffMs = now.getTime() - d.getTime();
+  const days = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+  const time = d.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false });
+
+  // Show time for sessions from last 5 dates
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const sessionDay = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  const dayDiff = Math.floor((todayStart.getTime() - sessionDay.getTime()) / (1000 * 60 * 60 * 24));
+
+  if (dayDiff === 0) return `today ${time}`;
+  if (dayDiff === 1) return `yest ${time}`;
+  if (dayDiff < 5) {
+    const weekday = d.toLocaleDateString("en-US", { weekday: "short" });
+    return `${weekday} ${time}`;
+  }
   if (days < 7) return `${days}d ago`;
   if (days < 30) return `${Math.floor(days / 7)}w ago`;
   if (days < 365) return `${Math.floor(days / 30)}mo ago`;
@@ -75,6 +87,28 @@ export function padRight(str: string, width: number): string {
 
 export function padLeft(str: string, width: number): string {
   return " ".repeat(Math.max(0, width - str.length)) + str;
+}
+
+/**
+ * Compute the 4 flexible column widths [name, project, session, branch] for
+ * the session list table given the available terminal width.
+ *
+ * Fixed columns (ID=36, Date=11, Dur=5, Msgs=5, Tokens=7, Size=7) plus the
+ * 9 two-space separators between 10 columns sum to 89 chars. The remainder
+ * is distributed proportionally among the flexible columns.
+ */
+export function computeListColWidths(termWidth: number): [number, number, number, number] {
+  const FIXED_TOTAL = 36 + 11 + 5 + 5 + 7 + 7 + 9 * 2; // 89
+  const MIN: [number, number, number, number] = [10, 12, 18, 8]; // name, project, session, branch
+  const WEIGHTS: [number, number, number, number] = [0.15, 0.22, 0.40, 0.23]; // sum = 1.00
+
+  const available = termWidth - FIXED_TOTAL;
+  const minTotal = MIN.reduce((a, b) => a + b, 0);
+  const flexSpace = Math.max(minTotal, available);
+
+  return MIN.map((min, i) =>
+    Math.max(min, Math.round(WEIGHTS[i]! * flexSpace))
+  ) as [number, number, number, number];
 }
 
 /** Print a table with column headers and rows */
@@ -107,7 +141,11 @@ export function printTable(
 }
 
 export function projectName(path: string): string {
-  const parts = path.split("/");
-  // Return last 2 segments for context
-  return parts.slice(-2).join("/");
+  const parts = path.split("/").filter(Boolean);
+  const last = parts[parts.length - 1] ?? path;
+  // Use last 2 segments if the last one is too short to be meaningful
+  if (last.length < 4 && parts.length >= 2) {
+    return parts.slice(-2).join("/");
+  }
+  return last;
 }

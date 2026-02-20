@@ -75,6 +75,11 @@ export interface EnrichedSession {
   facets?: SessionFacets;
   totalSizeBytes: number;
   projectDirName: string;
+  /** Duration in minutes computed from timestamps (fallback when meta unavailable) */
+  computedDurationMinutes?: number;
+  /** Tokens summed from JSONL message.usage (fallback when meta unavailable) */
+  computedInputTokens?: number;
+  computedOutputTokens?: number;
 }
 
 async function fileSize(path: string): Promise<number> {
@@ -114,18 +119,20 @@ async function readJson<T>(path: string): Promise<T | undefined> {
 }
 
 /** Strip XML-like tags and system caveats from prompts */
-function cleanPrompt(text: string): string {
+export function cleanPrompt(text: string): string {
   let cleaned = text.replace(/<[^>]+>/g, "").trim();
   // Remove "Caveat: ..." prefix from resumed sessions
   cleaned = cleaned.replace(/^Caveat:.*?(?:\.\s*)/s, "").trim();
   // Skip internal system messages that leaked into prompts
   if (cleaned.startsWith("DO NOT respond to these messages")) return "";
   if (cleaned.startsWith("[Request interrupted")) return "";
+  // Normalize newlines/tabs to spaces so labels don't break table rows
+  cleaned = cleaned.replace(/[\r\n\t]+/g, " ").replace(/ {2,}/g, " ");
   return cleaned || text.trim();
 }
 
 /** Check if a prompt is meaningful (not empty or system noise) */
-function isRealPrompt(text: string): boolean {
+export function isRealPrompt(text: string): boolean {
   const cleaned = cleanPrompt(text);
   return cleaned.length > 0 && cleaned !== "No prompt";
 }
@@ -145,31 +152,76 @@ export async function calculateSessionSize(
   return sizes.reduce((a, b) => a + b, 0);
 }
 
+/** Parse token usage from an assistant message's message.usage */
+function extractUsage(obj: Record<string, unknown>): { input: number; output: number } {
+  const msg = obj.message as Record<string, unknown> | undefined;
+  const usage = msg?.usage as Record<string, number> | undefined;
+  if (!usage) return { input: 0, output: 0 };
+  return {
+    input: (usage.input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0),
+    output: usage.output_tokens ?? 0,
+  };
+}
+
 /** Extract basic session info from a JSONL file (for sessions without an index) */
 async function parseJsonlSession(
   filePath: string,
   dirName: string
-): Promise<SessionEntry | undefined> {
+): Promise<{ entry: SessionEntry; inputTokens: number; outputTokens: number } | undefined> {
   try {
     const content = await readFile(filePath, "utf-8");
     const lines = content.split("\n").filter(Boolean);
     if (lines.length === 0) return undefined;
 
-    const first = JSON.parse(lines[0]!) as Record<string, unknown>;
-    const last = JSON.parse(lines[lines.length - 1]!) as Record<string, unknown>;
     const sessionId = basename(filePath, ".jsonl");
 
-    // Decode project path from dir name: "-Users-foo-bar" -> "/Users/foo/bar"
-    const projectPath =
-      (first.cwd as string) ||
-      "/" + dirName.replace(/^-/, "").replace(/-/g, "/");
-
-    // Find first user message for the prompt
+    // Parse all lines, extract metadata from message-type entries (not file-history-snapshot)
+    let projectPath = "";
+    let gitBranch: string | undefined;
+    let customTitle: string | undefined;
+    let firstTimestamp: string | undefined;
+    let lastTimestamp: string | undefined;
     let firstPrompt = "No prompt";
     let messageCount = 0;
+    let inputTokens = 0;
+    let outputTokens = 0;
+
     for (const line of lines) {
       const obj = JSON.parse(line) as Record<string, unknown>;
       const type = obj.type as string | undefined;
+
+      // Extract custom title
+      if (type === "custom-title") {
+        customTitle = obj.customTitle as string | undefined;
+        continue;
+      }
+
+      // Extract metadata from message entries (user/assistant/system have cwd, gitBranch)
+      if (!projectPath && obj.cwd) {
+        projectPath = obj.cwd as string;
+      }
+      if (!gitBranch && obj.gitBranch) {
+        gitBranch = obj.gitBranch as string;
+      }
+
+      // Track timestamps from messages (not snapshots)
+      if (obj.timestamp) {
+        if (!firstTimestamp) firstTimestamp = obj.timestamp as string;
+        lastTimestamp = obj.timestamp as string;
+      } else if ((obj.message as Record<string, unknown>)?.timestamp) {
+        const ts = (obj.message as Record<string, unknown>).timestamp as string;
+        if (!firstTimestamp) firstTimestamp = ts;
+        lastTimestamp = ts;
+      }
+
+      // Sum tokens from assistant messages
+      if (type === "assistant") {
+        const usage = extractUsage(obj);
+        inputTokens += usage.input;
+        outputTokens += usage.output;
+      }
+
+      // Count user messages and extract first prompt
       const role = obj.role as string | undefined;
       if (type === "user" || role === "user") {
         messageCount++;
@@ -193,24 +245,31 @@ async function parseJsonlSession(
       }
     }
 
-    const created =
-      (first.timestamp as string) || new Date().toISOString();
-    const modified =
-      (last.timestamp as string) || created;
+    // Fallback project path from dir name: "-Users-foo-bar" -> "/Users/foo/bar"
+    if (!projectPath) {
+      projectPath = "/" + dirName.replace(/^-/, "").replace(/-/g, "/");
+    }
 
     const fileStat = await stat(filePath);
+    const created = firstTimestamp || new Date(fileStat.birthtimeMs).toISOString();
+    const modified = lastTimestamp || new Date(fileStat.mtimeMs).toISOString();
 
     return {
-      sessionId,
-      fullPath: filePath,
-      fileMtime: fileStat.mtimeMs,
-      firstPrompt,
-      messageCount,
-      created,
-      modified,
-      gitBranch: first.gitBranch as string | undefined,
-      projectPath,
-      isSidechain: false,
+      entry: {
+        sessionId,
+        fullPath: filePath,
+        fileMtime: fileStat.mtimeMs,
+        firstPrompt,
+        customTitle,
+        messageCount,
+        created,
+        modified,
+        gitBranch,
+        projectPath,
+        isSidechain: false,
+      },
+      inputTokens,
+      outputTokens,
     };
   } catch {
     return undefined;
@@ -252,12 +311,18 @@ export async function getAllSessions(): Promise<EnrichedSession[]> {
           calculateSessionSize(entry.sessionId, entry.fullPath),
         ]);
 
+        // Compute duration from timestamps as fallback
+        const computedDurationMinutes = Math.round(
+          (new Date(entry.modified).getTime() - new Date(entry.created).getTime()) / 60000
+        );
+
         sessions.push({
           entry,
           meta,
           facets,
           totalSizeBytes,
           projectDirName: dirName,
+          computedDurationMinutes,
         });
       }
     }
@@ -271,8 +336,10 @@ export async function getAllSessions(): Promise<EnrichedSession[]> {
 
       for (const file of jsonlFiles) {
         const filePath = join(dirPath, file);
-        const entry = await parseJsonlSession(filePath, dirName);
-        if (!entry) continue;
+        const parsed = await parseJsonlSession(filePath, dirName);
+        if (!parsed) continue;
+
+        const { entry, inputTokens, outputTokens } = parsed;
 
         const [meta, facets, totalSizeBytes] = await Promise.all([
           readJson<SessionMeta>(
@@ -289,12 +356,20 @@ export async function getAllSessions(): Promise<EnrichedSession[]> {
           entry.firstPrompt = meta.first_prompt;
         }
 
+        // Compute duration from timestamps as fallback
+        const computedDurationMinutes = Math.round(
+          (new Date(entry.modified).getTime() - new Date(entry.created).getTime()) / 60000
+        );
+
         sessions.push({
           entry,
           meta,
           facets,
           totalSizeBytes,
           projectDirName: dirName,
+          computedDurationMinutes,
+          computedInputTokens: inputTokens || undefined,
+          computedOutputTokens: outputTokens || undefined,
         });
       }
     } catch {

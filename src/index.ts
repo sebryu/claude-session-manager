@@ -20,6 +20,7 @@ import {
   printTable,
   projectName,
   padLeft,
+  computeListColWidths,
 } from "./ui.ts";
 
 // ── Arg parsing ──────────────────────────────────────────────
@@ -94,11 +95,12 @@ async function cmdList() {
   const totalCount = sessions.length;
   const totalSize = sessions.reduce((a, s) => a + s.totalSizeBytes, 0);
   const totalTokens = sessions.reduce(
-    (a, s) => a + (s.meta?.input_tokens ?? 0) + (s.meta?.output_tokens ?? 0),
+    (a, s) => a + ((s.meta?.input_tokens ?? 0) + (s.meta?.output_tokens ?? 0)
+      || (s.computedInputTokens ?? 0) + (s.computedOutputTokens ?? 0)),
     0
   );
   const totalDuration = sessions.reduce(
-    (a, s) => a + (s.meta?.duration_minutes ?? 0),
+    (a, s) => a + (s.meta?.duration_minutes ?? s.computedDurationMinutes ?? 0),
     0
   );
 
@@ -112,11 +114,15 @@ async function cmdList() {
     printVerboseList(displayed);
   } else {
     const headers = ["ID", "Name", "Project", "Session", "Branch", "Date", "Dur", "Msgs", "Tokens", "Size"];
-    const colWidths = [36, 16, 14, 28, 12, 9, 5, 5, 7, 7];
+    const termWidth = process.stdout.columns ?? 160;
+    const [wName, wProject, wSession, wBranch] = computeListColWidths(termWidth);
+    const colWidths = [36, wName, wProject, wSession, wBranch, 11, 5, 5, 7, 7];
     const aligns: ("l" | "r")[] = ["l", "l", "l", "l", "l", "l", "r", "r", "r", "r"];
 
     const rows = displayed.map((s) => {
-      const tokens = (s.meta?.input_tokens ?? 0) + (s.meta?.output_tokens ?? 0);
+      const tokens = (s.meta?.input_tokens ?? 0) + (s.meta?.output_tokens ?? 0)
+        || (s.computedInputTokens ?? 0) + (s.computedOutputTokens ?? 0);
+      const duration = s.meta?.duration_minutes ?? s.computedDurationMinutes;
       return [
         s.entry.sessionId,
         truncate(s.entry.customTitle || "-", colWidths[1]!),
@@ -124,8 +130,8 @@ async function cmdList() {
         truncate(getSessionLabel(s), colWidths[3]!),
         truncate(s.entry.gitBranch ?? "-", colWidths[4]!),
         relativeDate(s.entry.modified),
-        s.meta?.duration_minutes != null
-          ? formatDurationShort(s.meta.duration_minutes)
+        duration != null && duration > 0
+          ? formatDurationShort(duration)
           : "-",
         String(s.entry.messageCount),
         tokens > 0 ? formatTokens(tokens) : "-",
