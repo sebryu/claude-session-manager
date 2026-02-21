@@ -34,6 +34,8 @@ import {
   formatSessionType,
   formatHelpfulness,
   primaryLanguage,
+  padRight,
+  padLeft,
   type ColSpec,
 } from "./ui.ts";
 
@@ -205,6 +207,112 @@ const VERBOSE_COLS: ColSpec[] = [
 
 const VERBOSE_COL_LEGEND =
   "WT=Worktree  Cmts=Commits  Int=Interruptions  Out=Outcome  Type=SessionType  Lang=Language  Feat=Features(T/M/W)  Err=ToolErrors";
+
+// ── Interactive row formatting ────────────────────────────────
+
+/** Pick the column spec and gap for a given verbosity level. */
+function browseColSpec(level: number): { cols: ColSpec[]; gap: number } {
+  if (level >= 2) return { cols: VERBOSE_COLS, gap: 1 };
+  if (level >= 1) return { cols: LIST_COLS, gap: 2 };
+  return { cols: MINIMAL_COLS, gap: 2 };
+}
+
+/** Build a single row string for an interactive choice. */
+function formatInteractiveRow(
+  s: EnrichedSession,
+  cols: ColSpec[],
+  widths: number[],
+  gap: number,
+  level: number,
+): string {
+  const sep = " ".repeat(gap);
+  let cells: string[];
+
+  if (level >= 2) {
+    // Verbose table cells (mirrors printVerboseTable)
+    const { project, worktree } = parseProjectPath(s.entry.projectPath);
+    const dur = sessionDuration(s);
+    const tok = sessionTokens(s);
+    const m = s.meta;
+    const f = s.facets;
+    cells = [
+      s.entry.sessionId.slice(0, 8),
+      truncate(s.entry.customTitle ?? "-", widths[1] ?? 6),
+      truncate(project, widths[2] ?? 8),
+      truncate(worktree ?? "-", widths[3] ?? 6),
+      truncate(getSessionLabel(s), widths[4] ?? 14),
+      truncate(s.entry.gitBranch ?? "-", widths[5] ?? 6),
+      relativeDate(s.entry.modified),
+      dur != null && dur > 0 ? formatDurationShort(dur) : "-",
+      String(s.entry.messageCount),
+      tok > 0 ? formatTokens(tok) : "-",
+      formatBytes(s.totalSizeBytes),
+      m ? String(m.files_modified) : "-",
+      m ? formatLines(m.lines_added, m.lines_removed) : "-",
+      m?.git_commits != null ? String(m.git_commits) : "-",
+      m?.tool_errors != null ? String(m.tool_errors) : "-",
+      m?.user_interruptions != null ? String(m.user_interruptions) : "-",
+      primaryLanguage(m?.languages),
+      formatFeatureFlags(m ?? undefined),
+      formatSessionType(f?.session_type),
+      formatOutcome(f?.outcome),
+      formatHelpfulness(f?.claude_helpfulness),
+    ];
+  } else if (level >= 1) {
+    // Standard table cells (mirrors printListTable)
+    const { project, worktree } = parseProjectPath(s.entry.projectPath);
+    const dur = sessionDuration(s);
+    const tok = sessionTokens(s);
+    cells = [
+      s.entry.sessionId,
+      truncate(s.entry.customTitle ?? "-", widths[1] ?? 8),
+      truncate(project, widths[2] ?? 12),
+      truncate(worktree ?? "-", widths[3] ?? 10),
+      truncate(getSessionLabel(s), widths[4] ?? 18),
+      truncate(s.entry.gitBranch ?? "-", widths[5] ?? 8),
+      relativeDate(s.entry.modified),
+      dur != null && dur > 0 ? formatDurationShort(dur) : "-",
+      String(s.entry.messageCount),
+      tok > 0 ? formatTokens(tok) : "-",
+      formatBytes(s.totalSizeBytes),
+    ];
+  } else {
+    // Minimal table cells (mirrors printMinimalTable)
+    const { project } = parseProjectPath(s.entry.projectPath);
+    cells = [
+      s.entry.sessionId.slice(0, 8),
+      truncate(project, widths[1] ?? 10),
+      truncate(getSessionLabel(s), widths[2] ?? 16),
+      relativeDate(s.entry.modified),
+      String(s.entry.messageCount),
+    ];
+  }
+
+  return cells
+    .map((cell, i) => {
+      const padFn = cols[i]?.align === "r" ? padLeft : padRight;
+      return padFn(cell, widths[i] ?? 0);
+    })
+    .join(sep);
+}
+
+/** Print a header + divider for interactive lists. */
+function printInteractiveHeader(
+  cols: ColSpec[],
+  widths: number[],
+  gap: number,
+  indent: number,
+): void {
+  const sep = " ".repeat(gap);
+  const prefix = " ".repeat(indent);
+  const headerLine = cols
+    .map((col, i) => `${c.bold}${padRight(col.header, widths[i] ?? 0)}${c.reset}`)
+    .join(sep);
+  const totalWidth = widths.reduce((a, b) => a + b + gap, -gap);
+  const divider = "\u2500".repeat(totalWidth);
+  console.log(`${prefix}${headerLine}`);
+  console.log(`${prefix}${c.dim}${divider}${c.reset}`);
+}
 
 // ── Progress display ──────────────────────────────────────────
 
@@ -993,16 +1101,19 @@ async function cmdInteractive() {
     `${c.dim}Found ${c.white}${sessions.length}${c.dim} sessions (${formatBytes(totalSize)})${c.reset}\n`
   );
 
-  mainLoop: while (true) {
-    const sessionChoices = sessions.map((s) => {
-      const label = truncate(getSessionLabel(s), 40);
-      const proj = truncate(projectName(s.entry.projectPath), 16);
-      const date = relativeDate(s.entry.modified);
-      const msgs = String(s.entry.messageCount);
-      const size = formatBytes(s.totalSizeBytes);
+  // Column layout based on verbosity (same specs as list command)
+  const INQUIRER_PREFIX = 4; // arrow + space used by select/checkbox
+  const { cols: browseCols, gap: browseGap } = browseColSpec(verbosityLevel);
+  const browseTermWidth = (process.stdout.columns ?? FALLBACK_TERM_WIDTH) - INQUIRER_PREFIX;
+  const browseWidths = computeColWidths(browseTermWidth, browseCols, browseGap);
 
+  mainLoop: while (true) {
+    printInteractiveHeader(browseCols, browseWidths, browseGap, INQUIRER_PREFIX);
+    if (verbosityLevel >= 2) console.log(`    ${c.dim}${VERBOSE_COL_LEGEND}${c.reset}`);
+
+    const sessionChoices = sessions.map((s) => {
       return {
-        name: `${proj.padEnd(18)} ${label.padEnd(42)} ${date.padEnd(12)} ${msgs.padStart(4)}  ${size.padStart(7)}`,
+        name: formatInteractiveRow(s, browseCols, browseWidths, browseGap, verbosityLevel),
         value: s.entry.sessionId,
         description: s.facets?.brief_summary
           ?? (s.entry.firstPrompt !== "No prompt"
@@ -1021,7 +1132,7 @@ async function cmdInteractive() {
           { name: "Delete multiple sessions...", value: "__delete__" },
           { name: "Exit", value: "__exit__" },
         ],
-        pageSize: 20,
+        pageSize: 25,
         loop: false,
       });
     } catch {
@@ -1118,14 +1229,14 @@ async function cmdInteractive() {
 async function interactiveBulkDelete(
   sessions: EnrichedSession[]
 ): Promise<Set<string>> {
-  const choices = sessions.map((s) => {
-    const label = truncate(getSessionLabel(s), 40);
-    const proj = truncate(projectName(s.entry.projectPath), 18);
-    const date = relativeDate(s.entry.modified);
-    const size = formatBytes(s.totalSizeBytes);
+  const INQUIRER_PREFIX = 4;
+  const { cols, gap } = browseColSpec(verbosityLevel);
+  const termW = (process.stdout.columns ?? FALLBACK_TERM_WIDTH) - INQUIRER_PREFIX;
+  const widths = computeColWidths(termW, cols, gap);
 
+  const choices = sessions.map((s) => {
     return {
-      name: `${proj.padEnd(20)} ${label.padEnd(42)} ${date.padEnd(10)} ${size}`,
+      name: formatInteractiveRow(s, cols, widths, gap, verbosityLevel),
       value: s.entry.sessionId,
       checked: false,
     };
@@ -1134,13 +1245,15 @@ async function interactiveBulkDelete(
   console.log(
     `\n${c.dim}Use arrow keys to navigate, space to select, enter to confirm${c.reset}\n`
   );
+  printInteractiveHeader(cols, widths, gap, INQUIRER_PREFIX);
+  if (verbosityLevel >= 2) console.log(`    ${c.dim}${VERBOSE_COL_LEGEND}${c.reset}`);
 
   let selected: string[];
   try {
     selected = await checkbox({
       message: "Select sessions to delete:",
       choices,
-      pageSize: 20,
+      pageSize: 25,
       loop: false,
     });
   } catch {
