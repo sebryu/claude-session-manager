@@ -8,6 +8,7 @@ import {
   padRight,
   padLeft,
   projectName,
+  parseProjectPath,
   computeColWidths,
   type ColSpec,
 } from "./ui.ts";
@@ -260,6 +261,36 @@ describe("computeColWidths", () => {
     expect(project).toBeGreaterThanOrEqual(12);
     expect(session).toBeGreaterThanOrEqual(18);
     expect(branch).toBeGreaterThanOrEqual(8);
+  });
+});
+
+// ── projectName ───────────────────────────────────────────────
+
+// ── parseProjectPath ─────────────────────────────────────────
+
+describe("parseProjectPath", () => {
+  it("returns project name with no worktree for a normal path", () => {
+    const result = parseProjectPath("/Users/foo/my-project");
+    expect(result.project).toBe("my-project");
+    expect(result.worktree).toBeUndefined();
+  });
+
+  it("extracts project and worktree from a worktree path", () => {
+    const result = parseProjectPath("/Users/foo/my-project/.claude/worktrees/feature-branch");
+    expect(result.project).toBe("my-project");
+    expect(result.worktree).toBe("feature-branch");
+  });
+
+  it("applies projectName short-segment fallback to the base project", () => {
+    const result = parseProjectPath("/Users/foo/ui/.claude/worktrees/fix-bug");
+    expect(result.project).toBe("foo/ui");
+    expect(result.worktree).toBe("fix-bug");
+  });
+
+  it("handles worktree names with hyphens and numbers", () => {
+    const result = parseProjectPath("/work/my-app/.claude/worktrees/feat-123-new-ui");
+    expect(result.project).toBe("my-app");
+    expect(result.worktree).toBe("feat-123-new-ui");
   });
 });
 
