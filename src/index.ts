@@ -47,7 +47,7 @@ const VALID_SORT_KEYS = ["date", "size", "tokens", "duration", "messages", "file
 // ── Arg parsing ──────────────────────────────────────────────
 
 const args = process.argv.slice(2);
-const command = args[0] ?? "list";
+const command = args[0] ?? "help";
 
 function getFlag(long: string, short?: string): string | undefined {
   const longIdx = args.indexOf(`--${long}`);
@@ -1580,7 +1580,7 @@ ${c.bold}COMMANDS${c.reset}
     --older-than <days>      Pre-select sessions older than N days
     --dry-run                Preview without deleting
 
-  ${c.green}interactive${c.reset}, ${c.green}browse${c.reset}  Browse sessions, resume or delete
+  ${c.green}interactive${c.reset}, ${c.green}browse${c.reset}, ${c.green}b${c.reset}  Browse sessions, resume or delete
     -p, --project <name>     Filter by project name
     -s, --sort <key>         Sort order
 
@@ -1654,6 +1654,7 @@ try {
       break;
     case "interactive":
     case "browse":
+    case "b":
       await cmdInteractive();
       break;
     case "export":
