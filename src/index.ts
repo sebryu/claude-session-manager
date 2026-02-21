@@ -1167,7 +1167,12 @@ async function cmdInteractive() {
             {
               name: "Resume with Claude",
               value: "resume",
-              description: `claude --resume ${session.entry.sessionId}`,
+              description: (() => {
+                const { worktree } = parseProjectPath(session.entry.projectPath);
+                const args = ["claude", "--resume", session.entry.sessionId];
+                if (worktree) args.push("-w", worktree);
+                return args.join(" ");
+              })(),
             },
             { name: "Show details", value: "info" },
             { name: "Delete this session", value: "delete" },
@@ -1182,11 +1187,22 @@ async function cmdInteractive() {
       if (action === "back") continue mainLoop;
 
       if (action === "resume") {
+        const projectPath = session.entry.projectPath;
+        const { worktree } = parseProjectPath(projectPath);
+        // For worktree sessions, cwd is the base project (before /.claude/worktrees/)
+        const WORKTREE_MARKER = "/.claude/worktrees/";
+        const wtIdx = projectPath.indexOf(WORKTREE_MARKER);
+        const cwd = wtIdx !== -1 ? projectPath.slice(0, wtIdx) : projectPath;
+
+        const args = ["--resume", session.entry.sessionId];
+        if (worktree) args.push("-w", worktree);
+
         console.log(
-          `\n${c.cyan}Resuming session ${c.bold}${session.entry.sessionId}${c.reset}${c.cyan}...${c.reset}\n`
+          `\n${c.cyan}Resuming session ${c.bold}${session.entry.sessionId}${c.reset}${c.cyan} in ${c.bold}${cwd}${c.reset}${c.cyan}${worktree ? ` (worktree: ${worktree})` : ""}...${c.reset}\n`
         );
-        const result = spawnSync("claude", ["--resume", session.entry.sessionId], {
+        const result = spawnSync("claude", args, {
           stdio: "inherit",
+          cwd,
         });
         process.exit(result.status ?? 0);
       }
