@@ -13,7 +13,7 @@ CLI tool for browsing, searching, and cleaning up local Claude Code sessions.
 
 ```
 src/
-  index.ts      - CLI entry point, arg parsing, command routing (list/find/info/clean/help)
+  index.ts      - CLI entry point, arg parsing, command routing (list/find/info/clean/interactive/help)
   sessions.ts   - Session discovery, JSONL parsing, metadata enrichment, size calculation, deletion
   ui.ts         - ANSI colors, table formatting, date/size/truncation helpers
 ```
@@ -38,6 +38,8 @@ bun run src/index.ts find "query"
 bun run src/index.ts info <session-id>
 bun run src/index.ts clean --older-than 30
 bun run src/index.ts clean --dry-run
+bun run src/index.ts browse            # interactive session browser
+bun run src/index.ts browse -p myproj  # browse filtered by project
 ```
 
 ## Column Reference

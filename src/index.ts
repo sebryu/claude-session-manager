@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 
-import { checkbox, confirm } from "@inquirer/prompts";
+import { select, checkbox, confirm, Separator } from "@inquirer/prompts";
+import { spawnSync } from "node:child_process";
 import {
   getAllSessions,
   getSessionLabel,
@@ -723,6 +724,259 @@ async function cmdClean() {
   );
 }
 
+async function cmdInteractive() {
+  const projectFilter = getFlag("project", "p");
+  const sortBy = getFlag("sort", "s") ?? "date";
+
+  console.log(`${c.cyan}${c.bold}Claude Session Manager${c.reset}\n`);
+  console.log(`${c.dim}Loading sessions...${c.reset}`);
+
+  let sessions = await getAllSessions();
+
+  if (projectFilter) {
+    const filter = projectFilter.toLowerCase();
+    sessions = sessions.filter((s) =>
+      s.entry.projectPath.toLowerCase().includes(filter)
+    );
+  }
+
+  const sortFn = getSortFn(sortBy);
+  sessions.sort(sortFn);
+
+  if (sessions.length === 0) {
+    console.log(`${c.yellow}No sessions found.${c.reset}`);
+    return;
+  }
+
+  const totalSize = sessions.reduce((a, s) => a + s.totalSizeBytes, 0);
+  console.log(
+    `${c.dim}Found ${c.white}${sessions.length}${c.dim} sessions (${formatBytes(totalSize)})${c.reset}\n`
+  );
+
+  mainLoop: while (true) {
+    const sessionChoices = sessions.map((s) => {
+      const label = truncate(getSessionLabel(s), 40);
+      const proj = truncate(projectName(s.entry.projectPath), 16);
+      const date = relativeDate(s.entry.modified);
+      const msgs = String(s.entry.messageCount);
+      const size = formatBytes(s.totalSizeBytes);
+
+      return {
+        name: `${proj.padEnd(18)} ${label.padEnd(42)} ${date.padEnd(12)} ${msgs.padStart(4)}  ${size.padStart(7)}`,
+        value: s.entry.sessionId,
+        description: s.facets?.brief_summary
+          || (s.entry.firstPrompt !== "No prompt"
+            ? truncate(s.entry.firstPrompt.replace(/[\r\n\t]+/g, " "), 90)
+            : undefined),
+      };
+    });
+
+    let selectedId: string;
+    try {
+      selectedId = await select({
+        message: "Select a session:",
+        choices: [
+          ...sessionChoices,
+          new Separator(),
+          { name: "Delete multiple sessions...", value: "__delete__" },
+          { name: "Exit", value: "__exit__" },
+        ],
+        pageSize: 20,
+        loop: false,
+      });
+    } catch {
+      return;
+    }
+
+    if (selectedId === "__exit__") return;
+
+    if (selectedId === "__delete__") {
+      const deletedIds = await interactiveBulkDelete(sessions);
+      if (deletedIds.size > 0) {
+        sessions = sessions.filter((s) => !deletedIds.has(s.entry.sessionId));
+      }
+      if (sessions.length === 0) {
+        console.log(`${c.yellow}No sessions remaining.${c.reset}`);
+        return;
+      }
+      continue;
+    }
+
+    const session = sessions.find((s) => s.entry.sessionId === selectedId)!;
+
+    // Action loop for selected session
+    while (true) {
+      const label = truncate(getSessionLabel(session), 60);
+      let action: string;
+      try {
+        action = await select({
+          message: `${label}`,
+          choices: [
+            {
+              name: "Resume with Claude",
+              value: "resume",
+              description: `claude --resume ${session.entry.sessionId}`,
+            },
+            { name: "Show details", value: "info" },
+            { name: "Delete this session", value: "delete" },
+            new Separator(),
+            { name: "Back to list", value: "back" },
+          ],
+        });
+      } catch {
+        return;
+      }
+
+      if (action === "back") continue mainLoop;
+
+      if (action === "resume") {
+        console.log(
+          `\n${c.cyan}Resuming session ${c.bold}${session.entry.sessionId}${c.reset}${c.cyan}...${c.reset}\n`
+        );
+        const result = spawnSync("claude", ["--resume", session.entry.sessionId], {
+          stdio: "inherit",
+        });
+        process.exit(result.status ?? 0);
+      }
+
+      if (action === "info") {
+        console.log();
+        printVerboseList([session]);
+        continue; // Stay in action menu
+      }
+
+      if (action === "delete") {
+        let confirmed: boolean;
+        try {
+          confirmed = await confirm({
+            message: `Delete session "${truncate(label, 40)}"? (${formatBytes(session.totalSizeBytes)})`,
+            default: false,
+          });
+        } catch {
+          return;
+        }
+
+        if (confirmed) {
+          process.stdout.write(`  ${c.red}Deleting${c.reset} ${label}...`);
+          await deleteSession(session);
+          console.log(` ${c.green}done${c.reset}\n`);
+          sessions = sessions.filter(
+            (s) => s.entry.sessionId !== session.entry.sessionId
+          );
+          if (sessions.length === 0) {
+            console.log(`${c.yellow}No sessions remaining.${c.reset}`);
+            return;
+          }
+        }
+        continue mainLoop;
+      }
+    }
+  }
+}
+
+async function interactiveBulkDelete(
+  sessions: EnrichedSession[]
+): Promise<Set<string>> {
+  const choices = sessions.map((s) => {
+    const label = truncate(getSessionLabel(s), 40);
+    const proj = truncate(projectName(s.entry.projectPath), 18);
+    const date = relativeDate(s.entry.modified);
+    const size = formatBytes(s.totalSizeBytes);
+
+    return {
+      name: `${proj.padEnd(20)} ${label.padEnd(42)} ${date.padEnd(10)} ${size}`,
+      value: s.entry.sessionId,
+      checked: false,
+    };
+  });
+
+  console.log(
+    `\n${c.dim}Use arrow keys to navigate, space to select, enter to confirm${c.reset}\n`
+  );
+
+  let selected: string[];
+  try {
+    selected = await checkbox({
+      message: "Select sessions to delete:",
+      choices,
+      pageSize: 20,
+      loop: false,
+    });
+  } catch {
+    console.log(`\n${c.dim}Cancelled.${c.reset}`);
+    return new Set();
+  }
+
+  if (selected.length === 0) {
+    console.log(`${c.dim}No sessions selected.${c.reset}\n`);
+    return new Set();
+  }
+
+  const toDelete = sessions.filter((s) =>
+    selected.includes(s.entry.sessionId)
+  );
+  const totalSize = toDelete.reduce((a, s) => a + s.totalSizeBytes, 0);
+
+  console.log(
+    `\n${c.yellow}Will delete ${c.bold}${toDelete.length}${c.reset}${c.yellow} session(s), freeing ${c.bold}${formatBytes(totalSize)}${c.reset}`
+  );
+
+  let confirmed: boolean;
+  try {
+    confirmed = await confirm({
+      message: "Proceed with deletion?",
+      default: false,
+    });
+  } catch {
+    console.log(`\n${c.dim}Cancelled.${c.reset}`);
+    return new Set();
+  }
+
+  if (!confirmed) {
+    console.log(`${c.dim}Aborted.${c.reset}\n`);
+    return new Set();
+  }
+
+  const deletedIds = new Set<string>();
+  for (const session of toDelete) {
+    const label = truncate(getSessionLabel(session), 50);
+    process.stdout.write(`  ${c.red}Deleting${c.reset} ${label}...`);
+    await deleteSession(session);
+    console.log(` ${c.green}done${c.reset}`);
+    deletedIds.add(session.entry.sessionId);
+  }
+
+  console.log(
+    `\n${c.green}${c.bold}Cleaned ${toDelete.length} session(s), freed ${formatBytes(totalSize)}.${c.reset}\n`
+  );
+
+  return deletedIds;
+}
+
+function getSortFn(
+  sortBy: string
+): (a: EnrichedSession, b: EnrichedSession) => number {
+  switch (sortBy) {
+    case "size":
+      return (a, b) => b.totalSizeBytes - a.totalSizeBytes;
+    case "tokens":
+      return (a, b) => {
+        const aT =
+          (a.meta?.input_tokens ?? 0) + (a.meta?.output_tokens ?? 0);
+        const bT =
+          (b.meta?.input_tokens ?? 0) + (b.meta?.output_tokens ?? 0);
+        return bT - aT;
+      };
+    case "duration":
+      return (a, b) =>
+        (b.meta?.duration_minutes ?? 0) - (a.meta?.duration_minutes ?? 0);
+    default:
+      return (a, b) =>
+        new Date(b.entry.modified).getTime() -
+        new Date(a.entry.modified).getTime();
+  }
+}
+
 function showHelp() {
   console.log(`
 ${c.cyan}${c.bold}csm${c.reset} - Claude Session Manager
@@ -752,6 +1006,10 @@ ${c.bold}COMMANDS${c.reset}
     --older-than <days>  Pre-select sessions older than N days
     --dry-run            Preview without deleting
 
+  ${c.green}interactive${c.reset}, ${c.green}browse${c.reset}  Browse sessions, resume or delete
+    -p, --project <name>  Filter by project name
+    -s, --sort <key>      Sort by: date, size, tokens, duration
+
   ${c.green}help${c.reset}              Show this help message
 
 ${c.bold}EXAMPLES${c.reset}
@@ -766,6 +1024,8 @@ ${c.bold}EXAMPLES${c.reset}
   csm f "expo upgrade" -vvv     Find with verbose detail cards
   csm i dfde9d19                Show session details (partial ID)
   csm c --older-than 30         Clean sessions older than 30 days
+  csm browse                    Interactive session browser
+  csm browse -p myproject       Browse sessions for a specific project
 
 ${c.bold}SETUP${c.reset}
   bun run setup                 Install 'csm' globally
@@ -794,6 +1054,10 @@ switch (command) {
   case "delete":
   case "c":
     await cmdClean();
+    break;
+  case "interactive":
+  case "browse":
+    await cmdInteractive();
     break;
   case "help":
   case "--help":
