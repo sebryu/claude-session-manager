@@ -5,6 +5,7 @@ import {
   truncate,
   formatDuration,
   formatDurationShort,
+  formatLines,
   padRight,
   padLeft,
   projectName,
@@ -138,6 +139,22 @@ describe("formatTokens", () => {
   it("formats millions with M suffix", () => {
     expect(formatTokens(1_000_000)).toBe("1.0M");
     expect(formatTokens(2_500_000)).toBe("2.5M");
+  });
+});
+
+// ── formatLines ──────────────────────────────────────────────
+
+describe("formatLines", () => {
+  it("returns dash when both zero", () => {
+    expect(formatLines(0, 0)).toBe("-");
+  });
+
+  it("formats small counts", () => {
+    expect(formatLines(716, 29)).toBe("+716/-29");
+  });
+
+  it("abbreviates thousands with k", () => {
+    expect(formatLines(1200, 0)).toBe("+1k/-0");
   });
 });
 
