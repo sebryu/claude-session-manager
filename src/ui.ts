@@ -1,16 +1,40 @@
 // ANSI color helpers
+
+/** Whether color output is enabled. Call initColor() at startup to configure. */
+let useColor = true;
+
+/**
+ * Initialize color mode. Call once at startup before any output.
+ * @param mode "always" | "auto" | "never"
+ */
+export function initColor(mode: "always" | "auto" | "never"): void {
+  if (mode === "always") {
+    useColor = true;
+  } else if (mode === "never") {
+    useColor = false;
+  } else {
+    // auto: respect NO_COLOR env var and TTY detection
+    useColor = process.env["NO_COLOR"] === undefined && !!process.stdout.isTTY;
+  }
+}
+
+type AnsiCode = string;
+function ansi(code: AnsiCode): string {
+  return useColor ? code : "";
+}
+
 export const c = {
-  reset: "\x1b[0m",
-  bold: "\x1b[1m",
-  dim: "\x1b[2m",
-  red: "\x1b[31m",
-  green: "\x1b[32m",
-  yellow: "\x1b[33m",
-  blue: "\x1b[34m",
-  magenta: "\x1b[35m",
-  cyan: "\x1b[36m",
-  white: "\x1b[37m",
-  gray: "\x1b[90m",
+  get reset()   { return ansi("\x1b[0m");  },
+  get bold()    { return ansi("\x1b[1m");  },
+  get dim()     { return ansi("\x1b[2m");  },
+  get red()     { return ansi("\x1b[31m"); },
+  get green()   { return ansi("\x1b[32m"); },
+  get yellow()  { return ansi("\x1b[33m"); },
+  get blue()    { return ansi("\x1b[34m"); },
+  get magenta() { return ansi("\x1b[35m"); },
+  get cyan()    { return ansi("\x1b[36m"); },
+  get white()   { return ansi("\x1b[37m"); },
+  get gray()    { return ansi("\x1b[90m"); },
 };
 
 export function formatBytes(bytes: number): string {
@@ -130,20 +154,23 @@ export function printTable(
   gap: number = 2
 ) {
   const sep = " ".repeat(gap);
+  const totalWidth = colWidths.reduce((a, b) => a + b + gap, -gap);
   const headerLine = headers
     .map((h, i) => {
       const padFn = aligns?.[i] === "r" ? padLeft : padRight;
-      return `${c.bold}${padFn(h, colWidths[i]!)}${c.reset}`;
+      return `${c.bold}${padFn(h, colWidths[i] ?? 0)}${c.reset}`;
     })
     .join(sep);
   console.log(headerLine);
-  console.log(c.dim + "\u2500".repeat(colWidths.reduce((a, b) => a + b + gap, -gap)) + c.reset);
+  // Use plain ASCII separator when color is disabled (no box-drawing chars)
+  const divider = useColor ? "\u2500".repeat(totalWidth) : "-".repeat(totalWidth);
+  console.log(c.dim + divider + c.reset);
 
   for (const row of rows) {
     const line = row
       .map((cell, i) => {
         const padFn = aligns?.[i] === "r" ? padLeft : padRight;
-        return padFn(cell, colWidths[i]!);
+        return padFn(cell, colWidths[i] ?? 0);
       })
       .join(sep);
     console.log(line);

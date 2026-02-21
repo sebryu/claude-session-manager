@@ -2,15 +2,21 @@
 
 import { select, checkbox, confirm, Separator } from "@inquirer/prompts";
 import { spawnSync } from "node:child_process";
+import { cp, mkdir } from "node:fs/promises";
+import { join } from "node:path";
+import { homedir } from "node:os";
 import {
   getAllSessions,
   getSessionLabel,
   searchSessions,
   deleteSession,
+  setDebug,
+  getClaudeDir,
   type EnrichedSession,
 } from "./sessions.ts";
 import {
   c,
+  initColor,
   formatBytes,
   formatTokens,
   formatDurationShort,
@@ -30,6 +36,11 @@ import {
   primaryLanguage,
   type ColSpec,
 } from "./ui.ts";
+
+// ── Constants ────────────────────────────────────────────────
+
+const FALLBACK_TERM_WIDTH = 120;
+const VALID_SORT_KEYS = ["date", "size", "tokens", "duration", "messages", "files-changed", "commits"];
 
 // ── Arg parsing ──────────────────────────────────────────────
 
@@ -52,17 +63,84 @@ function hasFlag(long: string, short?: string): boolean {
   return false;
 }
 
+function getFlagValue(long: string, short?: string): string | undefined {
+  // Support --flag=value syntax too
+  for (const arg of args) {
+    if (arg.startsWith(`--${long}=`)) return arg.slice(long.length + 3);
+  }
+  return getFlag(long, short);
+}
+
 function getVerbosityLevel(): number {
   let level = 0;
   for (const arg of args) {
     if (arg === "--verbose") level += 1;
     else if (/^-v+$/.test(arg)) level += arg.length - 1;
-    else if (arg === "-vt" || arg === "--verbose-table") level = Math.max(level, 2);
   }
   return level;
 }
 
+// ── Color / debug init ────────────────────────────────────────
+
+const colorFlag = getFlagValue("color") as "always" | "auto" | "never" | undefined;
+initColor(colorFlag ?? (process.env["NO_COLOR"] !== undefined ? "never" : "auto"));
+
+setDebug(hasFlag("debug"));
+
+// ── Config file + env var defaults ────────────────────────────
+
+interface CsmConfig {
+  sort?: string;
+  limit?: number;
+  project?: string;
+}
+
+async function loadConfig(): Promise<CsmConfig> {
+  const configPath = join(homedir(), ".csm.config.json");
+  try {
+    const content = await import("node:fs/promises").then(m => m.readFile(configPath, "utf-8"));
+    try {
+      return JSON.parse(content) as CsmConfig;
+    } catch {
+      process.stderr.write(`[warn] could not parse ~/.csm.config.json\n`);
+      return {};
+    }
+  } catch {
+    return {};
+  }
+}
+
+const config = await loadConfig();
+
+function getConfigSort(): string {
+  return getFlag("sort", "s") ?? process.env["CSM_SORT"] ?? config.sort ?? "date";
+}
+function getConfigProject(): string | undefined {
+  return getFlag("project", "p") ?? process.env["CSM_PROJECT"] ?? config.project;
+}
+function getConfigLimit(): number | undefined {
+  const str = getFlag("limit", "n") ?? process.env["CSM_LIMIT"];
+  if (!str) return config.limit;
+  const n = parseInt(str, 10);
+  if (isNaN(n) || n <= 0) {
+    process.stderr.write(`[error] --limit must be a positive integer, got: ${str}\n`);
+    process.exit(1);
+  }
+  return n;
+}
+
 const verbosityLevel = getVerbosityLevel();
+
+// ── Parse size strings ────────────────────────────────────────
+
+function parseSizeString(s: string): number | undefined {
+  const m = s.match(/^(\d+(?:\.\d+)?)\s*(B|KB|MB|GB)?$/i);
+  if (!m) return undefined;
+  const val = parseFloat(m[1] ?? "0");
+  const unit = (m[2] ?? "B").toUpperCase();
+  const multiplier: Record<string, number> = { B: 1, KB: 1024, MB: 1024 ** 2, GB: 1024 ** 3 };
+  return val * (multiplier[unit] ?? 1);
+}
 
 // ── Session helpers ───────────────────────────────────────────
 
@@ -125,44 +203,141 @@ const VERBOSE_COLS: ColSpec[] = [
   { header: "Help",    align: "l", min: 5  },
 ];
 
+const VERBOSE_COL_LEGEND =
+  "WT=Worktree  Cmts=Commits  Int=Interruptions  Out=Outcome  Type=SessionType  Lang=Language  Feat=Features(T/M/W)  Err=ToolErrors";
+
+// ── Progress display ──────────────────────────────────────────
+
+function makeProgressCallback(): (loaded: number, total: number) => void {
+  return (loaded, total) => {
+    process.stderr.write(`\rLoading sessions... ${loaded}/${total}  `);
+    if (loaded >= total) process.stderr.write("\r\x1b[K");
+  };
+}
+
 // ── Commands ─────────────────────────────────────────────────
 
 async function cmdList() {
-  const projectFilter = getFlag("project", "p");
-  const sortBy = getFlag("sort", "s") ?? "date";
-  const limitStr = getFlag("limit", "n");
-  const limit = limitStr ? parseInt(limitStr, 10) : undefined;
+  const projectFilter = getConfigProject();
+  const sortBy = getConfigSort();
+  const limit = getConfigLimit();
+  const outputJson = hasFlag("json");
+  const outputIds = hasFlag("ids-only");
+  const reverse = hasFlag("reverse", "r");
+  const exitOnEmpty = hasFlag("exit-2-on-empty");
 
-  console.log(`${c.cyan}${c.bold}Claude Session Manager${c.reset}\n`);
-  console.log(`${c.dim}Loading sessions...${c.reset}`);
+  // Validate sort key
+  if (!VALID_SORT_KEYS.includes(sortBy)) {
+    process.stderr.write(`[error] --sort must be one of: ${VALID_SORT_KEYS.join(", ")}\n`);
+    process.exit(1);
+  }
 
-  let sessions = await getAllSessions();
+  // Parse additional filters
+  const afterStr = getFlag("after");
+  const beforeStr = getFlag("before");
+  const minSizeStr = getFlag("min-size");
+  const maxSizeStr = getFlag("max-size");
+  const minTokensStr = getFlag("min-tokens");
+  const outcomeFilter = getFlag("outcome");
 
+  let afterDate: Date | undefined;
+  let beforeDate: Date | undefined;
+  if (afterStr) {
+    afterDate = new Date(afterStr);
+    if (isNaN(afterDate.getTime())) {
+      process.stderr.write(`[error] --after: invalid date "${afterStr}"\n`);
+      process.exit(1);
+    }
+  }
+  if (beforeStr) {
+    beforeDate = new Date(beforeStr);
+    if (isNaN(beforeDate.getTime())) {
+      process.stderr.write(`[error] --before: invalid date "${beforeStr}"\n`);
+      process.exit(1);
+    }
+  }
+  let minSizeBytes: number | undefined;
+  let maxSizeBytes: number | undefined;
+  if (minSizeStr) {
+    minSizeBytes = parseSizeString(minSizeStr);
+    if (minSizeBytes === undefined) {
+      process.stderr.write(`[error] --min-size: invalid size "${minSizeStr}" (example: 50MB)\n`);
+      process.exit(1);
+    }
+  }
+  if (maxSizeStr) {
+    maxSizeBytes = parseSizeString(maxSizeStr);
+    if (maxSizeBytes === undefined) {
+      process.stderr.write(`[error] --max-size: invalid size "${maxSizeStr}" (example: 500MB)\n`);
+      process.exit(1);
+    }
+  }
+  let minTokens: number | undefined;
+  if (minTokensStr) {
+    minTokens = parseInt(minTokensStr, 10);
+    if (isNaN(minTokens)) {
+      process.stderr.write(`[error] --min-tokens must be a number, got: ${minTokensStr}\n`);
+      process.exit(1);
+    }
+  }
+
+  if (!outputJson && !outputIds) {
+    console.log(`${c.cyan}${c.bold}Claude Session Manager${c.reset}\n`);
+    console.log(`${c.dim}Loading sessions...${c.reset}`);
+  }
+
+  let sessions = await getAllSessions(makeProgressCallback());
+
+  // Apply filters
   if (projectFilter) {
     const filter = projectFilter.toLowerCase();
     sessions = sessions.filter((s) =>
       s.entry.projectPath.toLowerCase().includes(filter)
     );
   }
-
-  if (sortBy === "size") {
-    sessions.sort((a, b) => b.totalSizeBytes - a.totalSizeBytes);
-  } else if (sortBy === "tokens") {
-    sessions.sort((a, b) => sessionTokens(b) - sessionTokens(a));
-  } else if (sortBy === "duration") {
-    sessions.sort(
-      (a, b) => (b.meta?.duration_minutes ?? 0) - (a.meta?.duration_minutes ?? 0)
-    );
-  } else {
-    sessions.sort(
-      (a, b) =>
-        new Date(b.entry.modified).getTime() -
-        new Date(a.entry.modified).getTime()
+  if (afterDate) {
+    sessions = sessions.filter((s) => new Date(s.entry.modified) >= afterDate!);
+  }
+  if (beforeDate) {
+    sessions = sessions.filter((s) => new Date(s.entry.modified) <= beforeDate!);
+  }
+  if (minSizeBytes !== undefined) {
+    sessions = sessions.filter((s) => s.totalSizeBytes >= minSizeBytes!);
+  }
+  if (maxSizeBytes !== undefined) {
+    sessions = sessions.filter((s) => s.totalSizeBytes <= maxSizeBytes!);
+  }
+  if (minTokens !== undefined) {
+    sessions = sessions.filter((s) => sessionTokens(s) >= minTokens!);
+  }
+  if (outcomeFilter) {
+    const of = outcomeFilter.toLowerCase();
+    sessions = sessions.filter((s) =>
+      (s.facets?.outcome ?? "").toLowerCase().includes(of)
     );
   }
 
+  // Sort
+  sessions.sort(getSortFn(sortBy));
+  if (reverse) sessions.reverse();
+
   if (sessions.length === 0) {
-    console.log(`${c.yellow}No sessions found.${c.reset}`);
+    if (!outputJson && !outputIds) {
+      console.log(`${c.yellow}No sessions found.${c.reset}`);
+    }
+    if (exitOnEmpty) process.exit(2);
+    return;
+  }
+
+  // Machine-readable output modes
+  if (outputJson) {
+    const displayed = limit ? sessions.slice(0, limit) : sessions;
+    console.log(JSON.stringify(displayed, null, 2));
+    return;
+  }
+  if (outputIds) {
+    const displayed = limit ? sessions.slice(0, limit) : sessions;
+    for (const s of displayed) console.log(s.entry.sessionId);
     return;
   }
 
@@ -204,15 +379,15 @@ async function cmdList() {
 }
 
 function printMinimalTable(sessions: EnrichedSession[]) {
-  const termWidth = process.stdout.columns ?? 120;
+  const termWidth = process.stdout.columns ?? FALLBACK_TERM_WIDTH;
   const widths = computeColWidths(termWidth, MINIMAL_COLS, 2);
 
   const rows = sessions.map((s) => {
     const { project } = parseProjectPath(s.entry.projectPath);
     return [
       s.entry.sessionId.slice(0, 8),
-      truncate(project, widths[1]!),
-      truncate(getSessionLabel(s), widths[2]!),
+      truncate(project, widths[1] ?? 10),
+      truncate(getSessionLabel(s), widths[2] ?? 16),
       relativeDate(s.entry.modified),
       String(s.entry.messageCount),
     ];
@@ -236,11 +411,11 @@ function printListTable(sessions: EnrichedSession[]) {
     const tok = sessionTokens(s);
     return [
       s.entry.sessionId,
-      truncate(s.entry.customTitle || "-", widths[1]!),
-      truncate(project, widths[2]!),
-      truncate(worktree ?? "-", widths[3]!),
-      truncate(getSessionLabel(s), widths[4]!),
-      truncate(s.entry.gitBranch ?? "-", widths[5]!),
+      truncate(s.entry.customTitle ?? "-", widths[1] ?? 8),
+      truncate(project, widths[2] ?? 12),
+      truncate(worktree ?? "-", widths[3] ?? 10),
+      truncate(getSessionLabel(s), widths[4] ?? 18),
+      truncate(s.entry.gitBranch ?? "-", widths[5] ?? 8),
       relativeDate(s.entry.modified),
       dur != null && dur > 0 ? formatDurationShort(dur) : "-",
       String(s.entry.messageCount),
@@ -269,11 +444,11 @@ function printVerboseTable(sessions: EnrichedSession[]) {
     const f = s.facets;
     return [
       s.entry.sessionId.slice(0, 8),
-      truncate(s.entry.customTitle || "-", widths[1]!),
-      truncate(project, widths[2]!),
-      truncate(worktree ?? "-", widths[3]!),
-      truncate(getSessionLabel(s), widths[4]!),
-      truncate(s.entry.gitBranch ?? "-", widths[5]!),
+      truncate(s.entry.customTitle ?? "-", widths[1] ?? 6),
+      truncate(project, widths[2] ?? 8),
+      truncate(worktree ?? "-", widths[3] ?? 6),
+      truncate(getSessionLabel(s), widths[4] ?? 14),
+      truncate(s.entry.gitBranch ?? "-", widths[5] ?? 6),
       relativeDate(s.entry.modified),
       dur != null && dur > 0 ? formatDurationShort(dur) : "-",
       String(s.entry.messageCount),
@@ -299,6 +474,7 @@ function printVerboseTable(sessions: EnrichedSession[]) {
     VERBOSE_COLS.map((col) => col.align),
     1
   );
+  console.log(`\n${c.dim}${VERBOSE_COL_LEGEND}${c.reset}`);
 }
 
 function printVerboseList(sessions: EnrichedSession[]) {
@@ -309,7 +485,7 @@ function printVerboseList(sessions: EnrichedSession[]) {
 
     console.log(`  ${c.cyan}${c.bold}${entry.sessionId}${c.reset}`);
 
-    const name = entry.customTitle || "-";
+    const name = entry.customTitle ?? "-";
     console.log(
       `  ${c.bold}Name:${c.reset} ${c.white}${name}${c.reset}` +
       `     ${c.bold}Project:${c.reset} ${entry.projectPath}`
@@ -412,22 +588,42 @@ function printVerboseList(sessions: EnrichedSession[]) {
 
 async function cmdFind() {
   const query = args.slice(1).filter((a) => !a.startsWith("-")).join(" ");
+  const outputJson = hasFlag("json");
+  const outputIds = hasFlag("ids-only");
+  const reverse = hasFlag("reverse", "r");
+  const exitOnEmpty = hasFlag("exit-2-on-empty");
+  const limit = getConfigLimit();
 
   if (!query) {
-    console.log(`${c.red}Usage: csm find <search query>${c.reset}`);
-    console.log(`${c.dim}Example: csm find "expo upgrade"${c.reset}`);
+    console.error(`${c.red}Usage: csm find <search query>${c.reset}`);
+    console.error(`${c.dim}Example: csm find "expo upgrade"${c.reset}`);
     process.exit(1);
   }
 
-  console.log(
-    `${c.cyan}${c.bold}Searching for:${c.reset} ${c.white}${query}${c.reset}\n`
-  );
+  if (!outputJson && !outputIds) {
+    console.log(
+      `${c.cyan}${c.bold}Searching for:${c.reset} ${c.white}${query}${c.reset}\n`
+    );
+  }
 
-  const allSessions = await getAllSessions();
-  const results = searchSessions(allSessions, query);
+  const allSessions = await getAllSessions(makeProgressCallback());
+  let results = searchSessions(allSessions, query);
+  if (reverse) results.reverse();
 
   if (results.length === 0) {
-    console.log(`${c.yellow}No sessions matching "${query}".${c.reset}`);
+    if (!outputJson && !outputIds) {
+      console.log(`${c.yellow}No sessions matching "${query}".${c.reset}`);
+    }
+    if (exitOnEmpty) process.exit(2);
+    return;
+  }
+
+  if (outputJson) {
+    console.log(JSON.stringify(results.slice(0, limit), null, 2));
+    return;
+  }
+  if (outputIds) {
+    for (const s of results.slice(0, limit)) console.log(s.entry.sessionId);
     return;
   }
 
@@ -436,13 +632,13 @@ async function cmdFind() {
   );
 
   if (verbosityLevel >= 3) {
-    printVerboseList(results.slice(0, 15));
+    printVerboseList(results.slice(0, limit));
   } else if (verbosityLevel >= 2) {
-    printVerboseTable(results.slice(0, 15));
+    printVerboseTable(results.slice(0, limit));
   } else if (verbosityLevel >= 1) {
-    printListTable(results.slice(0, 15));
+    printListTable(results.slice(0, limit));
   } else {
-    for (const s of results.slice(0, 15)) {
+    for (const s of results.slice(0, limit)) {
       const label = getSessionLabel(s);
       const proj = projectName(s.entry.projectPath);
       const tok = sessionTokens(s);
@@ -478,19 +674,52 @@ async function cmdFind() {
 
 async function cmdInfo() {
   const sessionId = args[1];
+  const outputJson = hasFlag("json");
+  const exitOnEmpty = hasFlag("exit-2-on-empty");
+
   if (!sessionId) {
-    console.log(`${c.red}Usage: csm info <session-id>${c.reset}`);
+    process.stderr.write(`${c.red}Usage: csm info <session-id>${c.reset}\n`);
     process.exit(1);
   }
 
-  const sessions = await getAllSessions();
-  const session = sessions.find((s) =>
+  // Enforce minimum prefix length
+  if (sessionId.length < 8) {
+    process.stderr.write(
+      `${c.red}Session ID prefix too short (min 8 chars, got ${sessionId.length})${c.reset}\n`
+    );
+    process.exit(1);
+  }
+
+  const sessions = await getAllSessions(makeProgressCallback());
+
+  // Ambiguity check
+  const matches = sessions.filter((s) =>
     s.entry.sessionId.startsWith(sessionId)
   );
 
-  if (!session) {
-    console.log(`${c.red}Session not found: ${sessionId}${c.reset}`);
+  if (matches.length === 0) {
+    if (!outputJson) {
+      console.log(`${c.red}Session not found: ${sessionId}${c.reset}`);
+    }
+    if (exitOnEmpty) process.exit(2);
     process.exit(1);
+  }
+
+  if (matches.length > 1) {
+    process.stderr.write(
+      `${c.red}Ambiguous session ID prefix "${sessionId}" matches ${matches.length} sessions:${c.reset}\n`
+    );
+    for (const m of matches) {
+      process.stderr.write(`  ${m.entry.sessionId}\n`);
+    }
+    process.exit(1);
+  }
+
+  const session = matches[0]!;
+
+  if (outputJson) {
+    console.log(JSON.stringify(session, null, 2));
+    return;
   }
 
   const { entry, meta, facets, totalSizeBytes } = session;
@@ -500,12 +729,12 @@ async function cmdInfo() {
   const label = getSessionLabel(session);
   const rows: [string, string][] = [
     ["ID", entry.sessionId],
-    ["Name", entry.customTitle || "-"],
+    ["Name", entry.customTitle ?? "-"],
     ["Label", label],
-    ["Summary", entry.summary || "-"],
+    ["Summary", entry.summary ?? "-"],
     ["First Prompt", truncate(entry.firstPrompt, 70)],
     ["Project", entry.projectPath],
-    ["Git Branch", entry.gitBranch || "-"],
+    ["Git Branch", entry.gitBranch ?? "-"],
     ["Created", formatDate(entry.created)],
     ["Modified", `${formatDate(entry.modified)} (${relativeDate(entry.modified)})`],
     ["Messages", String(entry.messageCount)],
@@ -596,19 +825,28 @@ async function cmdInfo() {
     }
   }
 
-  for (const [label, value] of rows) {
-    console.log(`  ${c.bold}${label.padEnd(16)}${c.reset} ${value}`);
+  for (const [lbl, value] of rows) {
+    console.log(`  ${c.bold}${lbl.padEnd(16)}${c.reset} ${value}`);
   }
   console.log();
 }
 
 async function cmdClean() {
-  const olderThanDays = getFlag("older-than");
+  const olderThanStr = getFlag("older-than");
   const dryRun = hasFlag("dry-run");
+
+  let olderThanDays: number | undefined;
+  if (olderThanStr) {
+    olderThanDays = parseInt(olderThanStr, 10);
+    if (isNaN(olderThanDays) || olderThanDays <= 0) {
+      process.stderr.write(`[error] --older-than must be a positive integer, got: ${olderThanStr}\n`);
+      process.exit(1);
+    }
+  }
 
   console.log(`${c.cyan}${c.bold}Claude Session Cleaner${c.reset}\n`);
 
-  const sessions = await getAllSessions();
+  const sessions = await getAllSessions(makeProgressCallback());
 
   if (sessions.length === 0) {
     console.log(`${c.yellow}No sessions found.${c.reset}`);
@@ -623,8 +861,8 @@ async function cmdClean() {
   );
 
   let preSelectedIds: Set<string> | undefined;
-  if (olderThanDays) {
-    const cutoff = Date.now() - parseInt(olderThanDays) * 24 * 60 * 60 * 1000;
+  if (olderThanDays !== undefined) {
+    const cutoff = Date.now() - olderThanDays * 24 * 60 * 60 * 1000;
     preSelectedIds = new Set(
       sessions
         .filter((s) => new Date(s.entry.modified).getTime() < cutoff)
@@ -691,9 +929,11 @@ async function cmdClean() {
     selected.includes(s.entry.sessionId)
   );
   const totalSize = toDelete.reduce((a, s) => a + s.totalSizeBytes, 0);
+  const totalTokensSel = toDelete.reduce((a, s) => a + sessionTokens(s), 0);
 
   console.log(
-    `\n${c.yellow}Will delete ${c.bold}${toDelete.length}${c.reset}${c.yellow} session(s), freeing ${c.bold}${formatBytes(totalSize)}${c.reset}`
+    `\n${c.yellow}Will delete ${c.bold}${toDelete.length}${c.reset}${c.yellow} session(s)` +
+    ` \u00b7 ${formatBytes(totalSize)} \u00b7 ${formatTokens(totalTokensSel)} tokens${c.reset}`
   );
 
   let confirmed: boolean;
@@ -725,13 +965,13 @@ async function cmdClean() {
 }
 
 async function cmdInteractive() {
-  const projectFilter = getFlag("project", "p");
-  const sortBy = getFlag("sort", "s") ?? "date";
+  const projectFilter = getConfigProject();
+  const sortBy = getConfigSort();
 
   console.log(`${c.cyan}${c.bold}Claude Session Manager${c.reset}\n`);
   console.log(`${c.dim}Loading sessions...${c.reset}`);
 
-  let sessions = await getAllSessions();
+  let sessions = await getAllSessions(makeProgressCallback());
 
   if (projectFilter) {
     const filter = projectFilter.toLowerCase();
@@ -765,7 +1005,7 @@ async function cmdInteractive() {
         name: `${proj.padEnd(18)} ${label.padEnd(42)} ${date.padEnd(12)} ${msgs.padStart(4)}  ${size.padStart(7)}`,
         value: s.entry.sessionId,
         description: s.facets?.brief_summary
-          || (s.entry.firstPrompt !== "No prompt"
+          ?? (s.entry.firstPrompt !== "No prompt"
             ? truncate(s.entry.firstPrompt.replace(/[\r\n\t]+/g, " "), 90)
             : undefined),
       };
@@ -802,7 +1042,8 @@ async function cmdInteractive() {
       continue;
     }
 
-    const session = sessions.find((s) => s.entry.sessionId === selectedId)!;
+    const session = sessions.find((s) => s.entry.sessionId === selectedId);
+    if (!session) continue mainLoop;
 
     // Action loop for selected session
     while (true) {
@@ -916,9 +1157,11 @@ async function interactiveBulkDelete(
     selected.includes(s.entry.sessionId)
   );
   const totalSize = toDelete.reduce((a, s) => a + s.totalSizeBytes, 0);
+  const totalTokensSel = toDelete.reduce((a, s) => a + sessionTokens(s), 0);
 
   console.log(
-    `\n${c.yellow}Will delete ${c.bold}${toDelete.length}${c.reset}${c.yellow} session(s), freeing ${c.bold}${formatBytes(totalSize)}${c.reset}`
+    `\n${c.yellow}Will delete ${c.bold}${toDelete.length}${c.reset}${c.yellow} session(s)` +
+    ` \u00b7 ${formatBytes(totalSize)} \u00b7 ${formatTokens(totalTokensSel)} tokens${c.reset}`
   );
 
   let confirmed: boolean;
@@ -953,6 +1196,215 @@ async function interactiveBulkDelete(
   return deletedIds;
 }
 
+async function cmdExport() {
+  const sessionId = args[1];
+  const destArg = args[2];
+
+  if (!sessionId || !destArg) {
+    process.stderr.write(`${c.red}Usage: csm export <session-id> <destination-dir>${c.reset}\n`);
+    process.exit(1);
+  }
+  if (sessionId.length < 8) {
+    process.stderr.write(`${c.red}Session ID prefix too short (min 8 chars)${c.reset}\n`);
+    process.exit(1);
+  }
+
+  const sessions = await getAllSessions(makeProgressCallback());
+  const matches = sessions.filter((s) => s.entry.sessionId.startsWith(sessionId));
+
+  if (matches.length === 0) {
+    process.stderr.write(`${c.red}Session not found: ${sessionId}${c.reset}\n`);
+    process.exit(1);
+  }
+  if (matches.length > 1) {
+    process.stderr.write(`${c.red}Ambiguous session ID "${sessionId}" (${matches.length} matches)${c.reset}\n`);
+    process.exit(1);
+  }
+
+  const session = matches[0]!;
+  const id = session.entry.sessionId;
+
+  await mkdir(destArg, { recursive: true });
+
+  const filesToCopy: Array<[string, string]> = [
+    [session.entry.fullPath, join(destArg, `${id}.jsonl`)],
+    [join(getClaudeDir(), "usage-data", "session-meta", `${id}.json`), join(destArg, `${id}.meta.json`)],
+    [join(getClaudeDir(), "usage-data", "facets", `${id}.json`), join(destArg, `${id}.facets.json`)],
+  ];
+
+  for (const [src, dst] of filesToCopy) {
+    try {
+      await cp(src, dst);
+      console.log(`  ${c.green}copied${c.reset} ${dst}`);
+    } catch {
+      // File may not exist (e.g. no meta/facets) — skip silently
+    }
+  }
+
+  console.log(`\n${c.green}Exported session ${id.slice(0, 8)} to ${destArg}${c.reset}`);
+}
+
+async function cmdBackup() {
+  const olderThanStr = getFlag("older-than");
+  const longFlagValues = new Set<string>();
+  for (let i = 0; i < args.length; i++) {
+    if ((args[i] ?? "").startsWith("--") && i + 1 < args.length) {
+      const next = args[i + 1];
+      if (next && !next.startsWith("-")) longFlagValues.add(next);
+    }
+  }
+  const destArg = args.find(
+    (a) => !a.startsWith("-") && a !== "backup" && !longFlagValues.has(a)
+  );
+
+  if (!destArg) {
+    process.stderr.write(`${c.red}Usage: csm backup --older-than <days> <destination-dir>${c.reset}\n`);
+    process.exit(1);
+  }
+  if (!olderThanStr) {
+    process.stderr.write(`${c.red}--older-than <days> is required for backup${c.reset}\n`);
+    process.exit(1);
+  }
+
+  const days = parseInt(olderThanStr, 10);
+  if (isNaN(days) || days <= 0) {
+    process.stderr.write(`[error] --older-than must be a positive integer\n`);
+    process.exit(1);
+  }
+
+  const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
+  const sessions = await getAllSessions(makeProgressCallback());
+  const toBackup = sessions.filter(
+    (s) => new Date(s.entry.modified).getTime() < cutoff
+  );
+
+  if (toBackup.length === 0) {
+    console.log(`${c.yellow}No sessions older than ${days} days.${c.reset}`);
+    return;
+  }
+
+  await mkdir(destArg, { recursive: true });
+  console.log(`${c.cyan}Backing up ${toBackup.length} sessions to ${destArg}...${c.reset}\n`);
+
+  for (const session of toBackup) {
+    const id = session.entry.sessionId;
+    const label = truncate(getSessionLabel(session), 40);
+    process.stdout.write(`  ${c.dim}${id.slice(0, 8)}${c.reset} ${label}...`);
+
+    const filesToCopy: Array<[string, string]> = [
+      [session.entry.fullPath, join(destArg, `${id}.jsonl`)],
+      [join(getClaudeDir(), "usage-data", "session-meta", `${id}.json`), join(destArg, `${id}.meta.json`)],
+      [join(getClaudeDir(), "usage-data", "facets", `${id}.json`), join(destArg, `${id}.facets.json`)],
+    ];
+
+    for (const [src, dst] of filesToCopy) {
+      try { await cp(src, dst); } catch { /* file may not exist */ }
+    }
+
+    console.log(` ${c.green}done${c.reset}`);
+  }
+
+  console.log(`\n${c.green}${c.bold}Backed up ${toBackup.length} sessions to ${destArg}${c.reset}`);
+}
+
+async function cmdStats() {
+  const byKey = getFlag("by") ?? "project";
+  const validByKeys = ["project", "language", "outcome"];
+  if (!validByKeys.includes(byKey)) {
+    process.stderr.write(`[error] --by must be one of: ${validByKeys.join(", ")}\n`);
+    process.exit(1);
+  }
+
+  console.log(`${c.cyan}${c.bold}Session Statistics${c.reset}\n`);
+  const sessions = await getAllSessions(makeProgressCallback());
+
+  if (sessions.length === 0) {
+    console.log(`${c.yellow}No sessions found.${c.reset}`);
+    return;
+  }
+
+  // Overall totals
+  const totalSessions = sessions.length;
+  const totalSize = sessions.reduce((a, s) => a + s.totalSizeBytes, 0);
+  const totalTokens = sessions.reduce((a, s) => a + sessionTokens(s), 0);
+  const totalDuration = sessions.reduce((a, s) => a + (sessionDuration(s) ?? 0), 0);
+  const avgSize = totalSize / totalSessions;
+
+  console.log(`${c.bold}Overall${c.reset}`);
+  console.log(`  Sessions:   ${totalSessions}`);
+  console.log(`  Total size: ${formatBytes(totalSize)}  (avg ${formatBytes(avgSize)})`);
+  console.log(`  Tokens:     ${formatTokens(totalTokens)}`);
+  console.log(`  Duration:   ${formatDuration(Math.round(totalDuration))}`);
+  console.log();
+
+  // Grouped breakdown
+  interface Group {
+    count: number;
+    size: number;
+    tokens: number;
+    duration: number;
+  }
+
+  const groups = new Map<string, Group>();
+
+  function addTo(key: string, s: EnrichedSession) {
+    const g = groups.get(key) ?? { count: 0, size: 0, tokens: 0, duration: 0 };
+    g.count++;
+    g.size += s.totalSizeBytes;
+    g.tokens += sessionTokens(s);
+    g.duration += sessionDuration(s) ?? 0;
+    groups.set(key, g);
+  }
+
+  for (const s of sessions) {
+    if (byKey === "project") {
+      addTo(projectName(s.entry.projectPath), s);
+    } else if (byKey === "language") {
+      const lang = primaryLanguage(s.meta?.languages) || "-";
+      addTo(lang, s);
+    } else if (byKey === "outcome") {
+      const outcome = formatOutcome(s.facets?.outcome) || "-";
+      addTo(outcome, s);
+    }
+  }
+
+  const sorted = [...groups.entries()].sort((a, b) => b[1].size - a[1].size);
+  console.log(`${c.bold}By ${byKey}${c.reset}`);
+
+  const headers = ["Group", "Sessions", "Size", "Tokens", "Duration"];
+  const rows = sorted.map(([key, g]) => [
+    key,
+    String(g.count),
+    formatBytes(g.size),
+    formatTokens(g.tokens),
+    formatDuration(Math.round(g.duration)),
+  ]);
+  const colWidths = [24, 8, 10, 10, 10];
+  printTable(headers, rows, colWidths, ["l", "r", "r", "r", "r"]);
+}
+
+function cmdColumns() {
+  console.log(`${c.cyan}${c.bold}CSM Column Reference${c.reset}\n`);
+
+  const sections: Array<{ title: string; cols: ColSpec[] }> = [
+    { title: "Minimal view (default)", cols: MINIMAL_COLS },
+    { title: "Standard table (-v)", cols: LIST_COLS },
+    { title: "Wide table (-vv)", cols: VERBOSE_COLS },
+  ];
+
+  for (const { title, cols } of sections) {
+    console.log(`${c.bold}${title}${c.reset}`);
+    for (const col of cols) {
+      const flex = col.weight ? ` (flex ${(col.weight * 100).toFixed(0)}%)` : " (fixed)";
+      console.log(`  ${c.green}${col.header.padEnd(8)}${c.reset}  min=${col.weight ? `${col.min} ` : col.min}${flex}`);
+    }
+    console.log();
+  }
+
+  console.log(`${c.bold}Wide table (-vv) legend${c.reset}`);
+  console.log(`  ${VERBOSE_COL_LEGEND}`);
+}
+
 function getSortFn(
   sortBy: string
 ): (a: EnrichedSession, b: EnrichedSession) => number {
@@ -960,16 +1412,16 @@ function getSortFn(
     case "size":
       return (a, b) => b.totalSizeBytes - a.totalSizeBytes;
     case "tokens":
-      return (a, b) => {
-        const aT =
-          (a.meta?.input_tokens ?? 0) + (a.meta?.output_tokens ?? 0);
-        const bT =
-          (b.meta?.input_tokens ?? 0) + (b.meta?.output_tokens ?? 0);
-        return bT - aT;
-      };
+      return (a, b) => sessionTokens(b) - sessionTokens(a);
     case "duration":
       return (a, b) =>
         (b.meta?.duration_minutes ?? 0) - (a.meta?.duration_minutes ?? 0);
+    case "messages":
+      return (a, b) => b.entry.messageCount - a.entry.messageCount;
+    case "files-changed":
+      return (a, b) => (b.meta?.files_modified ?? 0) - (a.meta?.files_modified ?? 0);
+    case "commits":
+      return (a, b) => (b.meta?.git_commits ?? 0) - (a.meta?.git_commits ?? 0);
     default:
       return (a, b) =>
         new Date(b.entry.modified).getTime() -
@@ -986,86 +1438,135 @@ ${c.bold}USAGE${c.reset}
 
 ${c.bold}COMMANDS${c.reset}
   ${c.green}list${c.reset}, ${c.green}l${c.reset}              List all sessions (default)
-    -p, --project <name>  Filter by project name
-    -s, --sort <key>      Sort by: date, size, tokens, duration
-    -n, --limit <N>       Show only the first N sessions
-    -v                    Standard table (ID, project, session, date, stats)
-    -vv                   Wide table with all available columns
-    -vvv                  Card-style output with full details
+    -p, --project <name>     Filter by project name
+    -s, --sort <key>         Sort by: date, size, tokens, duration, messages, files-changed, commits
+    -n, --limit <N>          Show only the first N sessions
+    -r, --reverse            Reverse the sort order
+    -v                       Standard table (ID, project, session, date, stats)
+    -vv                      Wide table with all available columns + legend
+    -vvv                     Card-style output with full details
+    --after <date>           Show sessions modified after date
+    --before <date>          Show sessions modified before date
+    --min-size <size>        Filter by minimum size (e.g. 50MB)
+    --max-size <size>        Filter by maximum size
+    --min-tokens <N>         Filter by minimum token count
+    --outcome <value>        Filter by outcome (fully, partial, unclear)
+    --json                   Output as JSON array
+    --ids-only               Output one session ID per line
+    --exit-2-on-empty        Exit with code 2 if no sessions matched
 
   ${c.green}find${c.reset}, ${c.green}f${c.reset} <query>       Search sessions by description
-    Searches summaries, prompts, goals, and branch names
-    -v                    Standard table (ID, project, session, date, stats)
-    -vv                   Wide table with all available columns
-    -vvv                  Card-style output with full details
+    --json / --ids-only      Machine-readable output
+    -r, --reverse            Reverse result order
 
   ${c.green}info${c.reset}, ${c.green}i${c.reset} <session-id>  Show detailed session information
-    Accepts partial session IDs (8 chars is enough)
+    Requires at least 8 chars of the session ID
+    --json                   Output as JSON object
 
   ${c.green}clean${c.reset}, ${c.green}c${c.reset}             Interactively select and remove sessions
-    --older-than <days>  Pre-select sessions older than N days
-    --dry-run            Preview without deleting
+    --older-than <days>      Pre-select sessions older than N days
+    --dry-run                Preview without deleting
 
   ${c.green}interactive${c.reset}, ${c.green}browse${c.reset}  Browse sessions, resume or delete
-    -p, --project <name>  Filter by project name
-    -s, --sort <key>      Sort by: date, size, tokens, duration
+    -p, --project <name>     Filter by project name
+    -s, --sort <key>         Sort order
 
-  ${c.green}help${c.reset}              Show this help message
+  ${c.green}export${c.reset} <id> <dir>     Export a single session to a directory
+  ${c.green}backup${c.reset} <dir>          Bulk export sessions older than N days
+    --older-than <days>      (required)
+
+  ${c.green}stats${c.reset}                 Aggregate statistics across sessions
+    --by project|language|outcome  Group by dimension
+
+  ${c.green}columns${c.reset}               Show column reference for all table views
+  ${c.green}help${c.reset}                  Show this help message
+
+${c.bold}GLOBAL FLAGS${c.reset}
+  --debug                    Enable verbose stderr logging
+  --color always|auto|never  Color output mode (default: auto)
+
+${c.bold}EXIT CODES${c.reset}
+  0  Success
+  1  Error (invalid args, I/O failure, etc.)
+  2  No sessions matched (with --exit-2-on-empty)
+
+${c.bold}CONFIG FILE${c.reset}
+  ~/.csm.config.json         Default sort, limit, project
+  CSM_SORT, CSM_PROJECT, CSM_LIMIT  Environment variable overrides
 
 ${c.bold}EXAMPLES${c.reset}
-  csm                           List all sessions (minimal view)
-  csm l -v                      List with standard table (all stats)
-  csm l -vv                     List with all columns (wide table)
-  csm l -vvv                    List with verbose card output
-  csm l -s size -n 20           Top 20 sessions by size
-  csm l -s tokens               Sort by token usage
-  csm f "expo upgrade"          Find sessions about expo upgrades
-  csm f "expo upgrade" -v       Find with standard table
-  csm f "expo upgrade" -vvv     Find with verbose detail cards
-  csm i dfde9d19                Show session details (partial ID)
-  csm c --older-than 30         Clean sessions older than 30 days
-  csm browse                    Interactive session browser
-  csm browse -p myproject       Browse sessions for a specific project
+  csm                                List all sessions (minimal view)
+  csm l -v                           List with standard table
+  csm l -vv                          List with all columns
+  csm l -s size -n 20                Top 20 sessions by size
+  csm l -s tokens --min-tokens 10000 Sessions with 10k+ tokens
+  csm l --json | jq '.[].entry.sessionId'  JSON output
+  csm l --ids-only | head -5         First 5 session IDs
+  csm f "expo upgrade"               Search sessions
+  csm i dfde9d19                     Show session details
+  csm c --older-than 30              Clean sessions older than 30 days
+  csm export dfde9d19 ./backups/     Export single session
+  csm backup --older-than 60 ./arch/ Backup old sessions
+  csm stats --by language            Stats grouped by language
+  csm browse                         Interactive session browser
 
 ${c.bold}SETUP${c.reset}
-  bun run setup                 Install 'csm' globally
+  bun run setup                      Install 'csm' globally
 `);
 }
 
 // ── Main ─────────────────────────────────────────────────────
 
-switch (command) {
-  case "list":
-  case "l":
-    await cmdList();
-    break;
-  case "find":
-  case "search":
-  case "f":
-    await cmdFind();
-    break;
-  case "info":
-  case "show":
-  case "i":
-    await cmdInfo();
-    break;
-  case "clean":
-  case "remove":
-  case "delete":
-  case "c":
-    await cmdClean();
-    break;
-  case "interactive":
-  case "browse":
-    await cmdInteractive();
-    break;
-  case "help":
-  case "--help":
-  case "-h":
-    showHelp();
-    break;
-  default:
-    console.log(`${c.red}Unknown command: ${command}${c.reset}`);
-    showHelp();
-    process.exit(1);
+try {
+  switch (command) {
+    case "list":
+    case "l":
+      await cmdList();
+      break;
+    case "find":
+    case "search":
+    case "f":
+      await cmdFind();
+      break;
+    case "info":
+    case "show":
+    case "i":
+      await cmdInfo();
+      break;
+    case "clean":
+    case "remove":
+    case "delete":
+    case "c":
+      await cmdClean();
+      break;
+    case "interactive":
+    case "browse":
+      await cmdInteractive();
+      break;
+    case "export":
+    case "e":
+      await cmdExport();
+      break;
+    case "backup":
+      await cmdBackup();
+      break;
+    case "stats":
+      await cmdStats();
+      break;
+    case "columns":
+      cmdColumns();
+      break;
+    case "help":
+    case "--help":
+    case "-h":
+      showHelp();
+      break;
+    default:
+      process.stderr.write(`${c.red}Unknown command: ${command}${c.reset}\n`);
+      showHelp();
+      process.exit(1);
+  }
+} catch (err) {
+  process.stderr.write(`${c.red}Error: ${String(err)}${c.reset}\n`);
+  process.exit(1);
 }

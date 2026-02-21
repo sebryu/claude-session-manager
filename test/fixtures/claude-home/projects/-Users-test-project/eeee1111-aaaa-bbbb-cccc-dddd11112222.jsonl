@@ -1,0 +1,3 @@
+{"type":"user","role":"user","content":"Write a unit test","cwd":"/Users/test/project","gitBranch":"main","timestamp":"2023-12-01T10:00:00.000Z"}
+{"type":"assistant","role":"assistant","message":{"content":"I'll write the test","usage":{"input_tokens":100,"output_tokens":50}},"timestamp":"2023-12-01T10:00:05.000Z"}
+{"type":"user","role":"user","content":"Add another test case","timestamp":"2023-12-01T10:01:00.000Z"}

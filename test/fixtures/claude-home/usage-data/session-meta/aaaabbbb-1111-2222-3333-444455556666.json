@@ -1,0 +1,20 @@
+{
+  "session_id": "aaaabbbb-1111-2222-3333-444455556666",
+  "project_path": "/Users/test/project",
+  "start_time": "2023-11-14T22:13:20.000Z",
+  "duration_minutes": 17,
+  "user_message_count": 3,
+  "assistant_message_count": 2,
+  "tool_counts": { "Read": 5, "Edit": 2 },
+  "languages": { "TypeScript": 150, "JavaScript": 30 },
+  "input_tokens": 15000,
+  "output_tokens": 3000,
+  "lines_added": 42,
+  "lines_removed": 10,
+  "files_modified": 3,
+  "git_commits": 1,
+  "uses_task_agent": false,
+  "uses_mcp": false,
+  "uses_web_search": false,
+  "uses_web_fetch": false
+}

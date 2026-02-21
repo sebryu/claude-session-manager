@@ -5,11 +5,11 @@ import {
   truncate,
   formatDuration,
   formatDurationShort,
-  relativeDate,
   padRight,
   padLeft,
   projectName,
-  computeListColWidths,
+  computeColWidths,
+  type ColSpec,
 } from "./ui.ts";
 import { cleanPrompt, isRealPrompt } from "./sessions.ts";
 
@@ -205,42 +205,57 @@ describe("padLeft", () => {
   });
 });
 
-// ── computeListColWidths ─────────────────────────────────────
+// ── computeColWidths ─────────────────────────────────────────
 
-describe("computeListColWidths", () => {
-  // Fixed cols + 9 separators of 2 = 89
-  const FIXED_TOTAL = 36 + 11 + 5 + 5 + 7 + 7 + 9 * 2;
+describe("computeColWidths", () => {
+  // 10-column layout: 6 fixed + 4 flex, 9 separators at gap=2
+  const COLS: ColSpec[] = [
+    { header: "ID",      align: "l", min: 36 },
+    { header: "Name",    align: "l", min: 10, weight: 0.10 },
+    { header: "Project", align: "l", min: 12, weight: 0.20 },
+    { header: "Session", align: "l", min: 18, weight: 0.50 },
+    { header: "Branch",  align: "l", min: 8,  weight: 0.20 },
+    { header: "Date",    align: "l", min: 11 },
+    { header: "Dur",     align: "r", min: 5  },
+    { header: "Msgs",    align: "r", min: 5  },
+    { header: "Tokens",  align: "r", min: 7  },
+    { header: "Size",    align: "r", min: 7  },
+  ];
+  const GAP = 2;
 
-  it("returns exactly 4 widths", () => {
-    expect(computeListColWidths(200).length).toBe(4);
+  it("returns a width for every column", () => {
+    expect(computeColWidths(200, COLS, GAP).length).toBe(COLS.length);
   });
 
-  it("session column gets the largest share", () => {
-    const [name, project, session, branch] = computeListColWidths(220);
-    expect(session).toBeGreaterThan(name);
-    expect(session).toBeGreaterThan(project);
-    expect(session).toBeGreaterThan(branch);
+  it("session column gets the largest flex share", () => {
+    const widths = computeColWidths(220, COLS, GAP);
+    const [, name, project, session, branch] = widths;
+    expect(session).toBeGreaterThan(name!);
+    expect(session).toBeGreaterThan(project!);
+    expect(session).toBeGreaterThan(branch!);
   });
 
   it("total columns fill the terminal width on wide displays", () => {
     for (const termWidth of [160, 180, 200, 220, 260]) {
-      const widths = computeListColWidths(termWidth);
-      const total = FIXED_TOTAL + widths.reduce((a, b) => a + b, 0);
-      // Allow ±3 chars from rounding across 4 columns
+      const widths = computeColWidths(termWidth, COLS, GAP);
+      const total = widths.reduce((a, b) => a + b, 0) + (COLS.length - 1) * GAP;
+      // Allow ±3 chars from rounding across 4 flex columns
       expect(Math.abs(total - termWidth)).toBeLessThanOrEqual(3);
     }
   });
 
-  it("expands columns as terminal gets wider", () => {
-    const [, , session160] = computeListColWidths(160);
-    const [, , session220] = computeListColWidths(220);
-    const [, , session300] = computeListColWidths(300);
-    expect(session220).toBeGreaterThan(session160);
-    expect(session300).toBeGreaterThan(session220);
+  it("expands flex columns as terminal gets wider", () => {
+    const w160 = computeColWidths(160, COLS, GAP);
+    const w220 = computeColWidths(220, COLS, GAP);
+    const w300 = computeColWidths(300, COLS, GAP);
+    // session is at index 3
+    expect(w220[3]).toBeGreaterThan(w160[3]!);
+    expect(w300[3]).toBeGreaterThan(w220[3]!);
   });
 
   it("never goes below minimum widths on narrow terminals", () => {
-    const [name, project, session, branch] = computeListColWidths(100);
+    const widths = computeColWidths(100, COLS, GAP);
+    const [, name, project, session, branch] = widths;
     expect(name).toBeGreaterThanOrEqual(10);
     expect(project).toBeGreaterThanOrEqual(12);
     expect(session).toBeGreaterThanOrEqual(18);
