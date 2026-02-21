@@ -20,16 +20,14 @@ import {
   printTable,
   projectName,
   parseProjectPath,
-  padLeft,
-  computeListColWidths,
-  computeVerboseColWidths,
+  computeColWidths,
   formatLines,
   formatFeatureFlags,
   formatOutcome,
   formatSessionType,
   formatHelpfulness,
   primaryLanguage,
-  avgResponseTime,
+  type ColSpec,
 } from "./ui.ts";
 
 // ── Arg parsing ──────────────────────────────────────────────
@@ -56,6 +54,59 @@ function hasFlag(long: string, short?: string): boolean {
 const verbose = hasFlag("verbose", "v");
 const verboseTable = args.includes("--verbose-table") || args.includes("-vt");
 
+// ── Session helpers ───────────────────────────────────────────
+
+function sessionTokens(s: EnrichedSession): number {
+  return (s.meta?.input_tokens ?? 0) + (s.meta?.output_tokens ?? 0)
+    || (s.computedInputTokens ?? 0) + (s.computedOutputTokens ?? 0);
+}
+
+function sessionDuration(s: EnrichedSession): number | undefined {
+  return s.meta?.duration_minutes ?? s.computedDurationMinutes;
+}
+
+// ── Column definitions ────────────────────────────────────────
+// Single source of truth for header label, alignment, and sizing.
+// See docs/columns.md for full documentation of each column.
+
+const LIST_COLS: ColSpec[] = [
+  { header: "ID",       align: "l", min: 36 },
+  { header: "Name",     align: "l", min: 8,  weight: 0.10 },
+  { header: "Project",  align: "l", min: 12, weight: 0.20 },
+  { header: "Worktree", align: "l", min: 10, weight: 0.13 },
+  { header: "Session",  align: "l", min: 18, weight: 0.37 },
+  { header: "Branch",   align: "l", min: 8,  weight: 0.20 },
+  { header: "Date",     align: "l", min: 11 },
+  { header: "Dur",      align: "r", min: 5  },
+  { header: "Msgs",     align: "r", min: 5  },
+  { header: "Tokens",   align: "r", min: 7  },
+  { header: "Size",     align: "r", min: 7  },
+];
+
+const VERBOSE_COLS: ColSpec[] = [
+  { header: "ID",      align: "l", min: 8  },
+  { header: "Name",    align: "l", min: 6,  weight: 0.10 },
+  { header: "Project", align: "l", min: 8,  weight: 0.20 },
+  { header: "WT",      align: "l", min: 6,  weight: 0.15 },
+  { header: "Session", align: "l", min: 14, weight: 0.40 },
+  { header: "Branch",  align: "l", min: 6,  weight: 0.15 },
+  { header: "Date",    align: "l", min: 10 },
+  { header: "Dur",     align: "r", min: 3  },
+  { header: "Msgs",    align: "r", min: 4  },
+  { header: "Tok",     align: "r", min: 6  },
+  { header: "Sz",      align: "r", min: 6  },
+  { header: "Files",   align: "r", min: 5  },
+  { header: "Lines",   align: "r", min: 10 },
+  { header: "Cmts",    align: "r", min: 4  },
+  { header: "Err",     align: "r", min: 3  },
+  { header: "Int",     align: "r", min: 3  },
+  { header: "Lang",    align: "l", min: 5  },
+  { header: "Feat",    align: "l", min: 3  },
+  { header: "Type",    align: "l", min: 5  },
+  { header: "Out",     align: "l", min: 4  },
+  { header: "Help",    align: "l", min: 5  },
+];
+
 // ── Commands ─────────────────────────────────────────────────
 
 async function cmdList() {
@@ -79,11 +130,7 @@ async function cmdList() {
   if (sortBy === "size") {
     sessions.sort((a, b) => b.totalSizeBytes - a.totalSizeBytes);
   } else if (sortBy === "tokens") {
-    sessions.sort((a, b) => {
-      const aT = (a.meta?.input_tokens ?? 0) + (a.meta?.output_tokens ?? 0);
-      const bT = (b.meta?.input_tokens ?? 0) + (b.meta?.output_tokens ?? 0);
-      return bT - aT;
-    });
+    sessions.sort((a, b) => sessionTokens(b) - sessionTokens(a));
   } else if (sortBy === "duration") {
     sessions.sort(
       (a, b) => (b.meta?.duration_minutes ?? 0) - (a.meta?.duration_minutes ?? 0)
@@ -104,13 +151,9 @@ async function cmdList() {
   // Compute totals before limiting
   const totalCount = sessions.length;
   const totalSize = sessions.reduce((a, s) => a + s.totalSizeBytes, 0);
-  const totalTokens = sessions.reduce(
-    (a, s) => a + ((s.meta?.input_tokens ?? 0) + (s.meta?.output_tokens ?? 0)
-      || (s.computedInputTokens ?? 0) + (s.computedOutputTokens ?? 0)),
-    0
-  );
+  const totalTokens = sessions.reduce((a, s) => a + sessionTokens(s), 0);
   const totalDuration = sessions.reduce(
-    (a, s) => a + (s.meta?.duration_minutes ?? s.computedDurationMinutes ?? 0),
+    (a, s) => a + (sessionDuration(s) ?? 0),
     0
   );
 
@@ -125,35 +168,7 @@ async function cmdList() {
   } else if (verboseTable) {
     printVerboseTable(displayed);
   } else {
-    const headers = ["ID", "Name", "Project", "Worktree", "Session", "Branch", "Date", "Dur", "Msgs", "Tokens", "Size"];
-    const termWidth = process.stdout.columns ?? 160;
-    const [wName, wProject, wWorktree, wSession, wBranch] = computeListColWidths(termWidth);
-    const colWidths = [36, wName, wProject, wWorktree, wSession, wBranch, 11, 5, 5, 7, 7];
-    const aligns: ("l" | "r")[] = ["l", "l", "l", "l", "l", "l", "l", "r", "r", "r", "r"];
-
-    const rows = displayed.map((s) => {
-      const tokens = (s.meta?.input_tokens ?? 0) + (s.meta?.output_tokens ?? 0)
-        || (s.computedInputTokens ?? 0) + (s.computedOutputTokens ?? 0);
-      const duration = s.meta?.duration_minutes ?? s.computedDurationMinutes;
-      const { project, worktree } = parseProjectPath(s.entry.projectPath);
-      return [
-        s.entry.sessionId,
-        truncate(s.entry.customTitle || "-", colWidths[1]!),
-        truncate(project, colWidths[2]!),
-        truncate(worktree ?? "-", colWidths[3]!),
-        truncate(getSessionLabel(s), colWidths[4]!),
-        truncate(s.entry.gitBranch ?? "-", colWidths[5]!),
-        relativeDate(s.entry.modified),
-        duration != null && duration > 0
-          ? formatDurationShort(duration)
-          : "-",
-        String(s.entry.messageCount),
-        tokens > 0 ? formatTokens(tokens) : "-",
-        formatBytes(s.totalSizeBytes),
-      ];
-    });
-
-    printTable(headers, rows, colWidths, aligns);
+    printListTable(displayed);
   }
 
   if (limit && limit < totalCount) {
@@ -168,43 +183,58 @@ async function cmdList() {
   );
 }
 
-function printVerboseTable(sessions: EnrichedSession[]) {
+function printListTable(sessions: EnrichedSession[]) {
   const termWidth = process.stdout.columns ?? 160;
-  const colWidths = computeVerboseColWidths(termWidth);
-
-  const headers = [
-    "ID", "Name", "Project", "WT", "Session", "Branch",
-    "Date", "Dur", "Msgs", "Tok", "Sz",
-    "Files", "Lines", "Cmts", "Err", "Int",
-    "Lang", "Feat", "Type", "Out", "Help",
-  ];
-  const aligns: ("l" | "r")[] = [
-    "l", "l", "l", "l", "l", "l",
-    "l", "r", "r", "r", "r",
-    "r", "r", "r", "r", "r",
-    "l", "l", "l", "l", "l",
-  ];
+  const widths = computeColWidths(termWidth, LIST_COLS, 2);
 
   const rows = sessions.map((s) => {
     const { project, worktree } = parseProjectPath(s.entry.projectPath);
-    const tokens =
-      (s.meta?.input_tokens ?? 0) + (s.meta?.output_tokens ?? 0) ||
-      (s.computedInputTokens ?? 0) + (s.computedOutputTokens ?? 0);
-    const duration = s.meta?.duration_minutes ?? s.computedDurationMinutes;
+    const dur = sessionDuration(s);
+    const tok = sessionTokens(s);
+    return [
+      s.entry.sessionId,
+      truncate(s.entry.customTitle || "-", widths[1]!),
+      truncate(project, widths[2]!),
+      truncate(worktree ?? "-", widths[3]!),
+      truncate(getSessionLabel(s), widths[4]!),
+      truncate(s.entry.gitBranch ?? "-", widths[5]!),
+      relativeDate(s.entry.modified),
+      dur != null && dur > 0 ? formatDurationShort(dur) : "-",
+      String(s.entry.messageCount),
+      tok > 0 ? formatTokens(tok) : "-",
+      formatBytes(s.totalSizeBytes),
+    ];
+  });
+
+  printTable(
+    LIST_COLS.map((col) => col.header),
+    rows,
+    widths,
+    LIST_COLS.map((col) => col.align)
+  );
+}
+
+function printVerboseTable(sessions: EnrichedSession[]) {
+  const termWidth = process.stdout.columns ?? 160;
+  const widths = computeColWidths(termWidth, VERBOSE_COLS, 1);
+
+  const rows = sessions.map((s) => {
+    const { project, worktree } = parseProjectPath(s.entry.projectPath);
+    const dur = sessionDuration(s);
+    const tok = sessionTokens(s);
     const m = s.meta;
     const f = s.facets;
-
     return [
       s.entry.sessionId.slice(0, 8),
-      truncate(s.entry.customTitle || "-", colWidths[1]!),
-      truncate(project, colWidths[2]!),
-      truncate(worktree ?? "-", colWidths[3]!),
-      truncate(getSessionLabel(s), colWidths[4]!),
-      truncate(s.entry.gitBranch ?? "-", colWidths[5]!),
+      truncate(s.entry.customTitle || "-", widths[1]!),
+      truncate(project, widths[2]!),
+      truncate(worktree ?? "-", widths[3]!),
+      truncate(getSessionLabel(s), widths[4]!),
+      truncate(s.entry.gitBranch ?? "-", widths[5]!),
       relativeDate(s.entry.modified),
-      duration != null && duration > 0 ? formatDurationShort(duration) : "-",
+      dur != null && dur > 0 ? formatDurationShort(dur) : "-",
       String(s.entry.messageCount),
-      tokens > 0 ? formatTokens(tokens) : "-",
+      tok > 0 ? formatTokens(tok) : "-",
       formatBytes(s.totalSizeBytes),
       m ? String(m.files_modified) : "-",
       m ? formatLines(m.lines_added, m.lines_removed) : "-",
@@ -219,7 +249,13 @@ function printVerboseTable(sessions: EnrichedSession[]) {
     ];
   });
 
-  printTable(headers, rows, colWidths, aligns, 1);
+  printTable(
+    VERBOSE_COLS.map((col) => col.header),
+    rows,
+    widths,
+    VERBOSE_COLS.map((col) => col.align),
+    1
+  );
 }
 
 function printVerboseList(sessions: EnrichedSession[]) {
@@ -228,24 +264,20 @@ function printVerboseList(sessions: EnrichedSession[]) {
     const sep = c.dim + "\u2500".repeat(80) + c.reset;
     console.log(sep);
 
-    // Line 1: Session ID
     console.log(`  ${c.cyan}${c.bold}${entry.sessionId}${c.reset}`);
 
-    // Line 2: Name & Project
     const name = entry.customTitle || "-";
     console.log(
       `  ${c.bold}Name:${c.reset} ${c.white}${name}${c.reset}` +
       `     ${c.bold}Project:${c.reset} ${entry.projectPath}`
     );
 
-    // Line 3: Label & Branch
     const label = getSessionLabel(s);
     console.log(
       `  ${c.bold}Label:${c.reset} ${c.green}${truncate(label, 60)}${c.reset}` +
       (entry.gitBranch ? `     ${c.bold}Branch:${c.reset} ${entry.gitBranch}` : "")
     );
 
-    // Line 4: Dates
     console.log(
       `  ${c.bold}Created:${c.reset} ${formatDate(entry.created)}` +
       `     ${c.bold}Modified:${c.reset} ${formatDate(entry.modified)} (${relativeDate(entry.modified)})` +
@@ -254,7 +286,6 @@ function printVerboseList(sessions: EnrichedSession[]) {
         : "")
     );
 
-    // Line 5: Messages, Size, Tokens
     const userMsgs = meta?.user_message_count ?? "?";
     const asstMsgs = meta?.assistant_message_count ?? "?";
     const inTok = meta?.input_tokens ?? 0;
@@ -267,7 +298,6 @@ function printVerboseList(sessions: EnrichedSession[]) {
         : "")
     );
 
-    // Line 6: Code changes (if meta available)
     if (meta) {
       const parts: string[] = [];
       if (meta.files_modified > 0)
@@ -282,7 +312,6 @@ function printVerboseList(sessions: EnrichedSession[]) {
         parts.push(`${c.bold}Errors:${c.reset} ${meta.tool_errors}`);
       if (parts.length > 0) console.log(`  ${parts.join("     ")}`);
 
-      // Tools
       if (Object.keys(meta.tool_counts).length > 0) {
         const tools = Object.entries(meta.tool_counts)
           .sort((a, b) => b[1] - a[1])
@@ -291,7 +320,6 @@ function printVerboseList(sessions: EnrichedSession[]) {
         console.log(`  ${c.bold}Tools:${c.reset} ${tools}`);
       }
 
-      // Languages
       if (Object.keys(meta.languages).length > 0) {
         const langs = Object.entries(meta.languages)
           .sort((a, b) => b[1] - a[1])
@@ -300,17 +328,16 @@ function printVerboseList(sessions: EnrichedSession[]) {
         console.log(`  ${c.bold}Languages:${c.reset} ${langs}`);
       }
 
-      // Feature flags
-      const features: string[] = [];
-      if (meta.uses_task_agent) features.push("Task Agent");
-      if (meta.uses_mcp) features.push("MCP");
-      if (meta.uses_web_search) features.push("Web Search");
-      if (meta.uses_web_fetch) features.push("Web Fetch");
+      const features = [
+        meta.uses_task_agent && "Task Agent",
+        meta.uses_mcp && "MCP",
+        meta.uses_web_search && "Web Search",
+        meta.uses_web_fetch && "Web Fetch",
+      ].filter(Boolean) as string[];
       if (features.length > 0)
         console.log(`  ${c.bold}Features:${c.reset} ${features.join(", ")}`);
     }
 
-    // Facets
     if (facets) {
       const facetParts: string[] = [];
       if (facets.session_type)
@@ -331,7 +358,6 @@ function printVerboseList(sessions: EnrichedSession[]) {
         console.log(`  ${c.bold}Friction:${c.reset} ${c.yellow}${facets.friction_detail}${c.reset}`);
     }
 
-    // First prompt
     if (entry.firstPrompt && entry.firstPrompt !== "No prompt") {
       const cleaned = truncate(entry.firstPrompt.replace(/\n/g, " "), 120);
       console.log(`  ${c.bold}First Prompt:${c.reset} ${c.dim}${cleaned}${c.reset}`);
@@ -372,7 +398,7 @@ async function cmdFind() {
     for (const s of results.slice(0, 15)) {
       const label = getSessionLabel(s);
       const proj = projectName(s.entry.projectPath);
-      const tokens = (s.meta?.input_tokens ?? 0) + (s.meta?.output_tokens ?? 0);
+      const tok = sessionTokens(s);
       const namePart = s.entry.customTitle
         ? `  ${c.magenta}[${s.entry.customTitle}]${c.reset}`
         : "";
@@ -385,8 +411,8 @@ async function cmdFind() {
         relativeDate(s.entry.modified),
         `${s.entry.messageCount} msgs`,
         formatBytes(s.totalSizeBytes),
-        tokens > 0 ? `${formatTokens(tokens)} tokens` : null,
-        s.entry.gitBranch ? `${s.entry.gitBranch}` : null,
+        tok > 0 ? `${formatTokens(tok)} tokens` : null,
+        s.entry.gitBranch ?? null,
       ].filter(Boolean).join(" | ");
       console.log(`${pad}${c.dim}${details}${c.reset}`);
       if (s.facets?.brief_summary) {
@@ -483,12 +509,12 @@ async function cmdInfo() {
       rows.push(["Error Types", cats]);
     }
 
-    // Feature flags
-    const features: string[] = [];
-    if (meta.uses_task_agent) features.push("Task Agent");
-    if (meta.uses_mcp) features.push("MCP");
-    if (meta.uses_web_search) features.push("Web Search");
-    if (meta.uses_web_fetch) features.push("Web Fetch");
+    const features = [
+      meta.uses_task_agent && "Task Agent",
+      meta.uses_mcp && "MCP",
+      meta.uses_web_search && "Web Search",
+      meta.uses_web_fetch && "Web Fetch",
+    ].filter(Boolean) as string[];
     if (features.length > 0)
       rows.push(["Features", features.join(", ")]);
   }
@@ -524,9 +550,7 @@ async function cmdInfo() {
   }
 
   for (const [label, value] of rows) {
-    console.log(
-      `  ${c.bold}${label.padEnd(16)}${c.reset} ${value}`
-    );
+    console.log(`  ${c.bold}${label.padEnd(16)}${c.reset} ${value}`);
   }
   console.log();
 }
@@ -551,7 +575,6 @@ async function cmdClean() {
       new Date(b.entry.modified).getTime()
   );
 
-  // Determine which are pre-selected (older-than filter)
   let preSelectedIds: Set<string> | undefined;
   if (olderThanDays) {
     const cutoff = Date.now() - parseInt(olderThanDays) * 24 * 60 * 60 * 1000;
@@ -565,11 +588,8 @@ async function cmdClean() {
   const choices = sessions.map((s) => {
     const label = truncate(getSessionLabel(s), 40);
     const proj = truncate(projectName(s.entry.projectPath), 18);
-    const date = relativeDate(s.entry.modified);
-    const size = formatBytes(s.totalSizeBytes);
-
     return {
-      name: `${proj.padEnd(20)} ${label.padEnd(42)} ${date.padEnd(10)} ${size}`,
+      name: `${proj.padEnd(20)} ${label.padEnd(42)} ${relativeDate(s.entry.modified).padEnd(10)} ${formatBytes(s.totalSizeBytes)}`,
       value: s.entry.sessionId,
       checked: preSelectedIds?.has(s.entry.sessionId) ?? false,
     };
@@ -673,7 +693,7 @@ ${c.bold}COMMANDS${c.reset}
     -s, --sort <key>      Sort by: date, size, tokens, duration
     -n, --limit <N>       Show only the first N sessions
     -v, --verbose         Card-style output with full details
-    -vt, --verbose-table  Wide table with all available columns (resizes terminal)
+    -vt, --verbose-table  Wide table with all available columns
 
   ${c.green}find${c.reset}, ${c.green}f${c.reset} <query>       Search sessions by description
     Searches summaries, prompts, goals, and branch names
@@ -691,6 +711,7 @@ ${c.bold}COMMANDS${c.reset}
 ${c.bold}EXAMPLES${c.reset}
   csm                           List all sessions (full IDs & names)
   csm l -v                      List with verbose card output
+  csm l -vt                     List with all columns (wide table)
   csm l -s size -n 20           Top 20 sessions by size
   csm l -s tokens               Sort by token usage
   csm f "expo upgrade"          Find sessions about expo upgrades

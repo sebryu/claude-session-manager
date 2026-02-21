@@ -80,7 +80,6 @@ export function relativeDate(iso: string): string {
   return `${Math.floor(days / 365)}y ago`;
 }
 
-/** Pad string to width, right-aligned */
 export function padRight(str: string, width: number): string {
   return str + " ".repeat(Math.max(0, width - str.length));
 }
@@ -89,60 +88,40 @@ export function padLeft(str: string, width: number): string {
   return " ".repeat(Math.max(0, width - str.length)) + str;
 }
 
-/**
- * Compute the 5 flexible column widths [name, project, worktree, session, branch] for
- * the session list table given the available terminal width.
- *
- * Fixed columns (ID=36, Date=11, Dur=5, Msgs=5, Tokens=7, Size=7) plus the
- * 10 two-space separators between 11 columns sum to 91 chars. The remainder
- * is distributed proportionally among the flexible columns.
- */
-export function computeListColWidths(termWidth: number): [number, number, number, number, number] {
-  const FIXED_TOTAL = 36 + 11 + 5 + 5 + 7 + 7 + 10 * 2; // 91
-  const MIN: [number, number, number, number, number] = [8, 12, 10, 18, 8]; // name, project, worktree, session, branch
-  const WEIGHTS: [number, number, number, number, number] = [0.10, 0.20, 0.13, 0.37, 0.20]; // sum = 1.00
+// ── Table layout ──────────────────────────────────────────────
 
-  const available = termWidth - FIXED_TOTAL;
-  const minTotal = MIN.reduce((a, b) => a + b, 0);
-  const flexSpace = Math.max(minTotal, available);
-
-  return MIN.map((min, i) =>
-    Math.max(min, Math.round(WEIGHTS[i]! * flexSpace))
-  ) as [number, number, number, number, number];
+/** Column definition: single source of truth for header, alignment, and sizing. */
+export interface ColSpec {
+  header: string;
+  align: "l" | "r";
+  /** Minimum (and fixed, when no weight) column width in chars. */
+  min: number;
+  /**
+   * When set, the column is flexible and receives a share of available space
+   * proportional to its weight. All weights across flexible columns should sum to 1.
+   */
+  weight?: number;
 }
 
 /**
- * Compute all 21 column widths for the verbose table, fitting into termWidth.
+ * Compute column widths from a ColSpec array, fitting within termWidth.
  *
- * 16 fixed cols (ID=8, Date=10, Dur=3, Msgs=4, Tok=6, Sz=6, Files=5, Lines=10,
- * Cmts=4, Err=3, Int=3, Lang=5, Feat=3, Type=5, Out=4, Help=5) = 84 chars.
- * 20 single-space separators = 20 chars. Fixed total = 104.
- * Remaining space is split among 5 flexible cols: Name, Project, WT, Session, Branch.
- *
- * Column order returned:
- * [ID, Name, Project, WT, Session, Branch, Date, Dur, Msgs, Tok, Sz,
- *  Files, Lines, Cmts, Err, Int, Lang, Feat, Type, Out, Help]
+ * Fixed columns (no weight) always render at their `min` width.
+ * Flex columns (with weight) share the remaining terminal space proportionally,
+ * each guaranteed at least their `min` width.
  */
-export function computeVerboseColWidths(termWidth: number): number[] {
-  const FIXED_SUM = 8 + 10 + 3 + 4 + 6 + 6 + 5 + 10 + 4 + 3 + 3 + 5 + 3 + 5 + 4 + 5; // 84
-  const SEPARATORS = 20; // 21 cols, 1-space gaps
-  const FIXED_TOTAL = FIXED_SUM + SEPARATORS; // 104
-
-  const FLEX_MIN = [6, 8, 6, 14, 6] as const; // name, project, wt, session, branch
-  const FLEX_WEIGHTS = [0.10, 0.20, 0.15, 0.40, 0.15] as const;
-
-  const available = Math.max(
-    FLEX_MIN.reduce((a, b) => a + b, 0),
-    termWidth - FIXED_TOTAL
+export function computeColWidths(termWidth: number, cols: ColSpec[], gap: number): number[] {
+  const separators = (cols.length - 1) * gap;
+  const fixedSum = cols.reduce((a, col) => a + (col.weight ? 0 : col.min), 0);
+  const flexMinSum = cols.reduce((a, col) => a + (col.weight ? col.min : 0), 0);
+  const available = Math.max(flexMinSum, termWidth - fixedSum - separators);
+  const totalWeight = cols.reduce((a, col) => a + (col.weight ?? 0), 0);
+  return cols.map((col) =>
+    col.weight ? Math.max(col.min, Math.round(available * col.weight / totalWeight)) : col.min
   );
-  const [wName, wProject, wWT, wSession, wBranch] = FLEX_MIN.map((min, i) =>
-    Math.max(min, Math.round(FLEX_WEIGHTS[i]! * available))
-  );
-
-  return [8, wName!, wProject!, wWT!, wSession!, wBranch!, 10, 3, 4, 6, 6, 5, 10, 4, 3, 3, 5, 3, 5, 4, 5];
 }
 
-/** Print a table with column headers and rows */
+/** Print a table with column headers and rows. */
 export function printTable(
   headers: string[],
   rows: string[][],
@@ -151,7 +130,6 @@ export function printTable(
   gap: number = 2
 ) {
   const sep = " ".repeat(gap);
-  // Header
   const headerLine = headers
     .map((h, i) => {
       const padFn = aligns?.[i] === "r" ? padLeft : padRight;
@@ -161,7 +139,6 @@ export function printTable(
   console.log(headerLine);
   console.log(c.dim + "\u2500".repeat(colWidths.reduce((a, b) => a + b + gap, -gap)) + c.reset);
 
-  // Rows
   for (const row of rows) {
     const line = row
       .map((cell, i) => {
@@ -173,20 +150,47 @@ export function printTable(
   }
 }
 
-/** Format lines added/removed compactly */
+// ── Path helpers ──────────────────────────────────────────────
+
+export function projectName(path: string): string {
+  const parts = path.split("/").filter(Boolean);
+  const last = parts[parts.length - 1] ?? path;
+  if (last.length < 4 && parts.length >= 2) {
+    return parts.slice(-2).join("/");
+  }
+  return last;
+}
+
+const WORKTREE_MARKER = "/.claude/worktrees/";
+
+/** Split a project path into base project name and optional worktree name. */
+export function parseProjectPath(path: string): { project: string; worktree?: string } {
+  const idx = path.indexOf(WORKTREE_MARKER);
+  if (idx !== -1) {
+    return {
+      project: projectName(path.slice(0, idx)),
+      worktree: path.slice(idx + WORKTREE_MARKER.length),
+    };
+  }
+  return { project: projectName(path) };
+}
+
+// ── Verbose-table cell formatters ─────────────────────────────
+
+/** Format lines added/removed compactly, e.g. `+716/-29` or `+1k/-0`. */
 export function formatLines(added: number, removed: number): string {
   if (added === 0 && removed === 0) return "-";
   const fmt = (n: number) => n >= 1000 ? `${Math.round(n / 1000)}k` : String(n);
   return `+${fmt(added)}/-${fmt(removed)}`;
 }
 
-/** Feature flags as compact 3-char string: T=task, M=mcp, W=web */
+/** Feature flags as a compact 3-char string: T=task agent, M=MCP, W=web. */
 export function formatFeatureFlags(meta?: {
   uses_task_agent?: boolean;
   uses_mcp?: boolean;
   uses_web_search?: boolean;
   uses_web_fetch?: boolean;
-} | undefined): string {
+}): string {
   if (!meta) return "---";
   return [
     meta.uses_task_agent ? "T" : "-",
@@ -195,7 +199,7 @@ export function formatFeatureFlags(meta?: {
   ].join("");
 }
 
-/** Abbreviate outcome field */
+/** Abbreviate `facets.outcome` to 4 chars. */
 export function formatOutcome(outcome?: string): string {
   if (!outcome) return "-";
   const l = outcome.toLowerCase();
@@ -205,7 +209,7 @@ export function formatOutcome(outcome?: string): string {
   return outcome.slice(0, 4);
 }
 
-/** Abbreviate session_type field */
+/** Abbreviate `facets.session_type` to 5 chars. */
 export function formatSessionType(type?: string): string {
   if (!type) return "-";
   const map: Record<string, string> = {
@@ -223,7 +227,7 @@ export function formatSessionType(type?: string): string {
   return (map[type.toLowerCase()] ?? type).slice(0, 5);
 }
 
-/** Abbreviate claude_helpfulness field */
+/** Abbreviate `facets.claude_helpfulness` to 4 chars. */
 export function formatHelpfulness(h?: string): string {
   if (!h) return "-";
   const l = h.toLowerCase();
@@ -234,43 +238,11 @@ export function formatHelpfulness(h?: string): string {
   return h.slice(0, 4);
 }
 
-/** Primary language from languages record */
+/** Top language from `meta.languages`, truncated to 5 chars. */
 export function primaryLanguage(languages?: Record<string, number>): string {
   if (!languages) return "-";
   const entries = Object.entries(languages);
   if (entries.length === 0) return "-";
   const [lang] = entries.sort((a, b) => b[1] - a[1])[0]!;
   return lang.slice(0, 5);
-}
-
-/** Average of an array, formatted as seconds */
-export function avgResponseTime(times?: number[]): string {
-  if (!times || times.length === 0) return "-";
-  const avg = times.reduce((a, b) => a + b, 0) / times.length;
-  if (avg < 60) return `${Math.round(avg)}s`;
-  return `${Math.round(avg / 60)}m`;
-}
-
-export function projectName(path: string): string {
-  const parts = path.split("/").filter(Boolean);
-  const last = parts[parts.length - 1] ?? path;
-  // Use last 2 segments if the last one is too short to be meaningful
-  if (last.length < 4 && parts.length >= 2) {
-    return parts.slice(-2).join("/");
-  }
-  return last;
-}
-
-const WORKTREE_MARKER = "/.claude/worktrees/";
-
-/** Parse a project path into base project name and optional worktree name */
-export function parseProjectPath(path: string): { project: string; worktree?: string } {
-  const idx = path.indexOf(WORKTREE_MARKER);
-  if (idx !== -1) {
-    return {
-      project: projectName(path.slice(0, idx)),
-      worktree: path.slice(idx + WORKTREE_MARKER.length),
-    };
-  }
-  return { project: projectName(path) };
 }

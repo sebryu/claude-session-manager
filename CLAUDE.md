@@ -40,6 +40,10 @@ bun run src/index.ts clean --older-than 30
 bun run src/index.ts clean --dry-run
 ```
 
+## Column Reference
+
+All table columns (normal, verbose-table, verbose-card) are documented in [`docs/columns.md`](docs/columns.md).
+
 ## Conventions
 
 - Use `node:fs/promises` and `node:path` for file operations (session discovery needs recursive dir reads)
