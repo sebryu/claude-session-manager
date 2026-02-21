@@ -111,22 +111,55 @@ export function computeListColWidths(termWidth: number): [number, number, number
   ) as [number, number, number, number, number];
 }
 
+/**
+ * Compute all 21 column widths for the verbose table, fitting into termWidth.
+ *
+ * 16 fixed cols (ID=8, Date=10, Dur=3, Msgs=4, Tok=6, Sz=6, Files=5, Lines=10,
+ * Cmts=4, Err=3, Int=3, Lang=5, Feat=3, Type=5, Out=4, Help=5) = 84 chars.
+ * 20 single-space separators = 20 chars. Fixed total = 104.
+ * Remaining space is split among 5 flexible cols: Name, Project, WT, Session, Branch.
+ *
+ * Column order returned:
+ * [ID, Name, Project, WT, Session, Branch, Date, Dur, Msgs, Tok, Sz,
+ *  Files, Lines, Cmts, Err, Int, Lang, Feat, Type, Out, Help]
+ */
+export function computeVerboseColWidths(termWidth: number): number[] {
+  const FIXED_SUM = 8 + 10 + 3 + 4 + 6 + 6 + 5 + 10 + 4 + 3 + 3 + 5 + 3 + 5 + 4 + 5; // 84
+  const SEPARATORS = 20; // 21 cols, 1-space gaps
+  const FIXED_TOTAL = FIXED_SUM + SEPARATORS; // 104
+
+  const FLEX_MIN = [6, 8, 6, 14, 6] as const; // name, project, wt, session, branch
+  const FLEX_WEIGHTS = [0.10, 0.20, 0.15, 0.40, 0.15] as const;
+
+  const available = Math.max(
+    FLEX_MIN.reduce((a, b) => a + b, 0),
+    termWidth - FIXED_TOTAL
+  );
+  const [wName, wProject, wWT, wSession, wBranch] = FLEX_MIN.map((min, i) =>
+    Math.max(min, Math.round(FLEX_WEIGHTS[i]! * available))
+  );
+
+  return [8, wName!, wProject!, wWT!, wSession!, wBranch!, 10, 3, 4, 6, 6, 5, 10, 4, 3, 3, 5, 3, 5, 4, 5];
+}
+
 /** Print a table with column headers and rows */
 export function printTable(
   headers: string[],
   rows: string[][],
   colWidths: number[],
-  aligns?: ("l" | "r")[]
+  aligns?: ("l" | "r")[],
+  gap: number = 2
 ) {
+  const sep = " ".repeat(gap);
   // Header
   const headerLine = headers
     .map((h, i) => {
       const padFn = aligns?.[i] === "r" ? padLeft : padRight;
       return `${c.bold}${padFn(h, colWidths[i]!)}${c.reset}`;
     })
-    .join("  ");
+    .join(sep);
   console.log(headerLine);
-  console.log(c.dim + "\u2500".repeat(colWidths.reduce((a, b) => a + b + 2, -2)) + c.reset);
+  console.log(c.dim + "\u2500".repeat(colWidths.reduce((a, b) => a + b + gap, -gap)) + c.reset);
 
   // Rows
   for (const row of rows) {
@@ -135,9 +168,87 @@ export function printTable(
         const padFn = aligns?.[i] === "r" ? padLeft : padRight;
         return padFn(cell, colWidths[i]!);
       })
-      .join("  ");
+      .join(sep);
     console.log(line);
   }
+}
+
+/** Format lines added/removed compactly */
+export function formatLines(added: number, removed: number): string {
+  if (added === 0 && removed === 0) return "-";
+  const fmt = (n: number) => n >= 1000 ? `${Math.round(n / 1000)}k` : String(n);
+  return `+${fmt(added)}/-${fmt(removed)}`;
+}
+
+/** Feature flags as compact 3-char string: T=task, M=mcp, W=web */
+export function formatFeatureFlags(meta?: {
+  uses_task_agent?: boolean;
+  uses_mcp?: boolean;
+  uses_web_search?: boolean;
+  uses_web_fetch?: boolean;
+} | undefined): string {
+  if (!meta) return "---";
+  return [
+    meta.uses_task_agent ? "T" : "-",
+    meta.uses_mcp ? "M" : "-",
+    (meta.uses_web_search || meta.uses_web_fetch) ? "W" : "-",
+  ].join("");
+}
+
+/** Abbreviate outcome field */
+export function formatOutcome(outcome?: string): string {
+  if (!outcome) return "-";
+  const l = outcome.toLowerCase();
+  if (l.includes("fully")) return "full";
+  if (l.includes("partial")) return "part";
+  if (l.includes("not") || l.includes("fail")) return "no";
+  return outcome.slice(0, 4);
+}
+
+/** Abbreviate session_type field */
+export function formatSessionType(type?: string): string {
+  if (!type) return "-";
+  const map: Record<string, string> = {
+    coding: "code",
+    debugging: "debug",
+    analysis: "anlys",
+    planning: "plan",
+    review: "rev",
+    documentation: "docs",
+    research: "rsrch",
+    iterative_refinement: "iter",
+    configuration: "cfg",
+    troubleshooting: "trbl",
+  };
+  return (map[type.toLowerCase()] ?? type).slice(0, 5);
+}
+
+/** Abbreviate claude_helpfulness field */
+export function formatHelpfulness(h?: string): string {
+  if (!h) return "-";
+  const l = h.toLowerCase();
+  if (l.startsWith("very")) return "v.hi";
+  if (l === "helpful") return "hi";
+  if (l.includes("somewhat")) return "mid";
+  if (l.includes("not")) return "low";
+  return h.slice(0, 4);
+}
+
+/** Primary language from languages record */
+export function primaryLanguage(languages?: Record<string, number>): string {
+  if (!languages) return "-";
+  const entries = Object.entries(languages);
+  if (entries.length === 0) return "-";
+  const [lang] = entries.sort((a, b) => b[1] - a[1])[0]!;
+  return lang.slice(0, 5);
+}
+
+/** Average of an array, formatted as seconds */
+export function avgResponseTime(times?: number[]): string {
+  if (!times || times.length === 0) return "-";
+  const avg = times.reduce((a, b) => a + b, 0) / times.length;
+  if (avg < 60) return `${Math.round(avg)}s`;
+  return `${Math.round(avg / 60)}m`;
 }
 
 export function projectName(path: string): string {

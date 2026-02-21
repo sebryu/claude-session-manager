@@ -22,6 +22,14 @@ import {
   parseProjectPath,
   padLeft,
   computeListColWidths,
+  computeVerboseColWidths,
+  formatLines,
+  formatFeatureFlags,
+  formatOutcome,
+  formatSessionType,
+  formatHelpfulness,
+  primaryLanguage,
+  avgResponseTime,
 } from "./ui.ts";
 
 // ── Arg parsing ──────────────────────────────────────────────
@@ -46,6 +54,7 @@ function hasFlag(long: string, short?: string): boolean {
 }
 
 const verbose = hasFlag("verbose", "v");
+const verboseTable = args.includes("--verbose-table") || args.includes("-vt");
 
 // ── Commands ─────────────────────────────────────────────────
 
@@ -113,6 +122,8 @@ async function cmdList() {
 
   if (verbose) {
     printVerboseList(displayed);
+  } else if (verboseTable) {
+    printVerboseTable(displayed);
   } else {
     const headers = ["ID", "Name", "Project", "Worktree", "Session", "Branch", "Date", "Dur", "Msgs", "Tokens", "Size"];
     const termWidth = process.stdout.columns ?? 160;
@@ -155,6 +166,60 @@ async function cmdList() {
   console.log(
     `\n${c.dim}${totalCount} sessions \u00b7 ${formatBytes(totalSize)} \u00b7 ${formatTokens(totalTokens)} tokens \u00b7 ${totalHours}h total${c.reset}`
   );
+}
+
+function printVerboseTable(sessions: EnrichedSession[]) {
+  const termWidth = process.stdout.columns ?? 160;
+  const colWidths = computeVerboseColWidths(termWidth);
+
+  const headers = [
+    "ID", "Name", "Project", "WT", "Session", "Branch",
+    "Date", "Dur", "Msgs", "Tok", "Sz",
+    "Files", "Lines", "Cmts", "Err", "Int",
+    "Lang", "Feat", "Type", "Out", "Help",
+  ];
+  const aligns: ("l" | "r")[] = [
+    "l", "l", "l", "l", "l", "l",
+    "l", "r", "r", "r", "r",
+    "r", "r", "r", "r", "r",
+    "l", "l", "l", "l", "l",
+  ];
+
+  const rows = sessions.map((s) => {
+    const { project, worktree } = parseProjectPath(s.entry.projectPath);
+    const tokens =
+      (s.meta?.input_tokens ?? 0) + (s.meta?.output_tokens ?? 0) ||
+      (s.computedInputTokens ?? 0) + (s.computedOutputTokens ?? 0);
+    const duration = s.meta?.duration_minutes ?? s.computedDurationMinutes;
+    const m = s.meta;
+    const f = s.facets;
+
+    return [
+      s.entry.sessionId.slice(0, 8),
+      truncate(s.entry.customTitle || "-", colWidths[1]!),
+      truncate(project, colWidths[2]!),
+      truncate(worktree ?? "-", colWidths[3]!),
+      truncate(getSessionLabel(s), colWidths[4]!),
+      truncate(s.entry.gitBranch ?? "-", colWidths[5]!),
+      relativeDate(s.entry.modified),
+      duration != null && duration > 0 ? formatDurationShort(duration) : "-",
+      String(s.entry.messageCount),
+      tokens > 0 ? formatTokens(tokens) : "-",
+      formatBytes(s.totalSizeBytes),
+      m ? String(m.files_modified) : "-",
+      m ? formatLines(m.lines_added, m.lines_removed) : "-",
+      m?.git_commits != null ? String(m.git_commits) : "-",
+      m?.tool_errors != null ? String(m.tool_errors) : "-",
+      m?.user_interruptions != null ? String(m.user_interruptions) : "-",
+      primaryLanguage(m?.languages),
+      formatFeatureFlags(m ?? undefined),
+      formatSessionType(f?.session_type),
+      formatOutcome(f?.outcome),
+      formatHelpfulness(f?.claude_helpfulness),
+    ];
+  });
+
+  printTable(headers, rows, colWidths, aligns, 1);
 }
 
 function printVerboseList(sessions: EnrichedSession[]) {
@@ -608,6 +673,7 @@ ${c.bold}COMMANDS${c.reset}
     -s, --sort <key>      Sort by: date, size, tokens, duration
     -n, --limit <N>       Show only the first N sessions
     -v, --verbose         Card-style output with full details
+    -vt, --verbose-table  Wide table with all available columns (resizes terminal)
 
   ${c.green}find${c.reset}, ${c.green}f${c.reset} <query>       Search sessions by description
     Searches summaries, prompts, goals, and branch names
