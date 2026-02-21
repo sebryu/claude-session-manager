@@ -9,6 +9,18 @@ import {
   padLeft,
   projectName,
   computeColWidths,
+  printTable,
+  initColor,
+  c,
+  formatDate,
+  relativeDate,
+  parseProjectPath,
+  formatLines,
+  formatFeatureFlags,
+  formatOutcome,
+  formatSessionType,
+  formatHelpfulness,
+  primaryLanguage,
   type ColSpec,
 } from "./ui.ts";
 import { cleanPrompt, isRealPrompt } from "./sessions.ts";
@@ -278,5 +290,503 @@ describe("projectName", () => {
   it("handles trailing slash gracefully", () => {
     // "bar" has length 3 (<4), so it falls back to last 2 segments
     expect(projectName("/Users/foo/bar/")).toBe("foo/bar");
+  });
+});
+
+// ── initColor & c ────────────────────────────────────────────
+
+describe("initColor", () => {
+  it("returns ANSI codes when mode is 'always'", () => {
+    initColor("always");
+    expect(c.red).toBe("\x1b[31m");
+    expect(c.bold).toBe("\x1b[1m");
+    expect(c.reset).toBe("\x1b[0m");
+    expect(c.dim).toBe("\x1b[2m");
+    expect(c.green).toBe("\x1b[32m");
+    expect(c.yellow).toBe("\x1b[33m");
+    expect(c.blue).toBe("\x1b[34m");
+    expect(c.magenta).toBe("\x1b[35m");
+    expect(c.cyan).toBe("\x1b[36m");
+    expect(c.white).toBe("\x1b[37m");
+    expect(c.gray).toBe("\x1b[90m");
+  });
+
+  it("returns empty strings when mode is 'never'", () => {
+    initColor("never");
+    expect(c.red).toBe("");
+    expect(c.bold).toBe("");
+    expect(c.reset).toBe("");
+    expect(c.dim).toBe("");
+    expect(c.green).toBe("");
+    expect(c.yellow).toBe("");
+    expect(c.blue).toBe("");
+    expect(c.magenta).toBe("");
+    expect(c.cyan).toBe("");
+    expect(c.white).toBe("");
+    expect(c.gray).toBe("");
+  });
+
+  it("auto mode respects environment (non-TTY in test → no color)", () => {
+    initColor("auto");
+    // In a test runner, stdout is typically not a TTY, so color should be off
+    // OR NO_COLOR might be set. Either way, we just verify it doesn't throw.
+    // The result depends on the environment, so we check it's a string.
+    expect(typeof c.red).toBe("string");
+    // Restore to never for remaining tests
+    initColor("never");
+  });
+
+  it("can switch modes back and forth", () => {
+    initColor("always");
+    expect(c.red).toBe("\x1b[31m");
+    initColor("never");
+    expect(c.red).toBe("");
+    initColor("always");
+    expect(c.red).toBe("\x1b[31m");
+    // Leave color off for other tests
+    initColor("never");
+  });
+});
+
+// ── formatDate ───────────────────────────────────────────────
+
+describe("formatDate", () => {
+  it("formats a known ISO date correctly", () => {
+    // Jan 15, 2024 in en-US
+    const result = formatDate("2024-01-15T12:00:00Z");
+    expect(result).toContain("Jan");
+    expect(result).toContain("15");
+    expect(result).toContain("2024");
+  });
+
+  it("formats another known date correctly", () => {
+    const result = formatDate("2023-12-25T00:00:00Z");
+    expect(result).toContain("Dec");
+    expect(result).toContain("25");
+    expect(result).toContain("2023");
+  });
+
+  it("handles a date at start of year", () => {
+    const result = formatDate("2025-01-01T00:00:00Z");
+    expect(result).toContain("Jan");
+    expect(result).toContain("1");
+    expect(result).toContain("2025");
+  });
+});
+
+// ── relativeDate ─────────────────────────────────────────────
+
+describe("relativeDate", () => {
+  function daysAgo(n: number): string {
+    const d = new Date();
+    d.setDate(d.getDate() - n);
+    d.setHours(14, 30, 0, 0);
+    return d.toISOString();
+  }
+
+  it("returns 'today HH:MM' for same-day dates", () => {
+    const now = new Date();
+    now.setHours(10, 15, 0, 0);
+    const result = relativeDate(now.toISOString());
+    expect(result).toMatch(/^today \d{2}:\d{2}$/);
+  });
+
+  it("returns 'yest HH:MM' for yesterday", () => {
+    const result = relativeDate(daysAgo(1));
+    expect(result).toMatch(/^yest \d{2}:\d{2}$/);
+  });
+
+  it("returns 'Weekday HH:MM' for 2-4 days ago", () => {
+    const result2 = relativeDate(daysAgo(2));
+    // Should be a short weekday name like "Mon", "Tue", etc.
+    expect(result2).toMatch(/^[A-Z][a-z]{2} \d{2}:\d{2}$/);
+
+    const result3 = relativeDate(daysAgo(3));
+    expect(result3).toMatch(/^[A-Z][a-z]{2} \d{2}:\d{2}$/);
+
+    const result4 = relativeDate(daysAgo(4));
+    expect(result4).toMatch(/^[A-Z][a-z]{2} \d{2}:\d{2}$/);
+  });
+
+  it("returns 'Xd ago' for 5-6 days ago", () => {
+    const result5 = relativeDate(daysAgo(5));
+    expect(result5).toMatch(/^\dd ago$/);
+
+    const result6 = relativeDate(daysAgo(6));
+    expect(result6).toMatch(/^\dd ago$/);
+  });
+
+  it("returns 'Xw ago' for 7-29 days ago", () => {
+    const result7 = relativeDate(daysAgo(7));
+    expect(result7).toBe("1w ago");
+
+    const result14 = relativeDate(daysAgo(14));
+    expect(result14).toBe("2w ago");
+
+    const result21 = relativeDate(daysAgo(21));
+    expect(result21).toBe("3w ago");
+  });
+
+  it("returns 'Xmo ago' for 30-364 days ago", () => {
+    const result30 = relativeDate(daysAgo(30));
+    expect(result30).toBe("1mo ago");
+
+    const result90 = relativeDate(daysAgo(90));
+    expect(result90).toBe("3mo ago");
+
+    const result180 = relativeDate(daysAgo(180));
+    expect(result180).toBe("6mo ago");
+  });
+
+  it("returns 'Xy ago' for 365+ days ago", () => {
+    const result365 = relativeDate(daysAgo(365));
+    expect(result365).toBe("1y ago");
+
+    const result730 = relativeDate(daysAgo(730));
+    expect(result730).toBe("2y ago");
+  });
+});
+
+// ── parseProjectPath ─────────────────────────────────────────
+
+describe("parseProjectPath", () => {
+  it("returns project name without worktree for normal paths", () => {
+    const result = parseProjectPath("/Users/me/my-project");
+    expect(result).toEqual({ project: "my-project" });
+  });
+
+  it("returns project and worktree when worktree marker is present", () => {
+    const result = parseProjectPath("/Users/me/my-project/.claude/worktrees/feature-branch");
+    expect(result).toEqual({
+      project: "my-project",
+      worktree: "feature-branch",
+    });
+  });
+
+  it("applies projectName() to base path for short last segments", () => {
+    const result = parseProjectPath("/Users/me/rn/.claude/worktrees/fix-bug");
+    expect(result).toEqual({
+      project: "me/rn",
+      worktree: "fix-bug",
+    });
+  });
+
+  it("handles path without worktree that has short last segment", () => {
+    const result = parseProjectPath("/Users/me/ui");
+    expect(result).toEqual({ project: "me/ui" });
+  });
+
+  it("returns undefined worktree for non-worktree path (not present in result)", () => {
+    const result = parseProjectPath("/Users/me/my-project");
+    expect(result.worktree).toBeUndefined();
+  });
+});
+
+// ── formatLines ──────────────────────────────────────────────
+
+describe("formatLines", () => {
+  it("returns dash when both are 0", () => {
+    expect(formatLines(0, 0)).toBe("-");
+  });
+
+  it("formats small numbers", () => {
+    expect(formatLines(10, 5)).toBe("+10/-5");
+  });
+
+  it("handles only additions", () => {
+    expect(formatLines(100, 0)).toBe("+100/-0");
+  });
+
+  it("handles only removals", () => {
+    expect(formatLines(0, 50)).toBe("+0/-50");
+  });
+
+  it("formats thousands with k suffix", () => {
+    expect(formatLines(1000, 2000)).toBe("+1k/-2k");
+  });
+
+  it("rounds thousands", () => {
+    expect(formatLines(1500, 2500)).toBe("+2k/-3k");
+  });
+
+  it("mixes small and large numbers", () => {
+    expect(formatLines(500, 3000)).toBe("+500/-3k");
+    expect(formatLines(5000, 42)).toBe("+5k/-42");
+  });
+});
+
+// ── formatFeatureFlags ───────────────────────────────────────
+
+describe("formatFeatureFlags", () => {
+  it("returns '---' when no meta is provided", () => {
+    expect(formatFeatureFlags()).toBe("---");
+    expect(formatFeatureFlags(undefined)).toBe("---");
+  });
+
+  it("returns '---' when all flags are false or absent", () => {
+    expect(formatFeatureFlags({})).toBe("---");
+    expect(formatFeatureFlags({ uses_task_agent: false, uses_mcp: false, uses_web_search: false })).toBe("---");
+  });
+
+  it("shows T when task agent is used", () => {
+    expect(formatFeatureFlags({ uses_task_agent: true })).toBe("T--");
+  });
+
+  it("shows M when MCP is used", () => {
+    expect(formatFeatureFlags({ uses_mcp: true })).toBe("-M-");
+  });
+
+  it("shows W when web_search is used", () => {
+    expect(formatFeatureFlags({ uses_web_search: true })).toBe("--W");
+  });
+
+  it("shows W when web_fetch is used", () => {
+    expect(formatFeatureFlags({ uses_web_fetch: true })).toBe("--W");
+  });
+
+  it("shows W when both web_search and web_fetch are used", () => {
+    expect(formatFeatureFlags({ uses_web_search: true, uses_web_fetch: true })).toBe("--W");
+  });
+
+  it("shows all flags together", () => {
+    expect(formatFeatureFlags({
+      uses_task_agent: true,
+      uses_mcp: true,
+      uses_web_search: true,
+    })).toBe("TMW");
+  });
+
+  it("shows partial combinations", () => {
+    expect(formatFeatureFlags({ uses_task_agent: true, uses_web_fetch: true })).toBe("T-W");
+    expect(formatFeatureFlags({ uses_mcp: true, uses_web_search: true })).toBe("-MW");
+  });
+});
+
+// ── formatOutcome ────────────────────────────────────────────
+
+describe("formatOutcome", () => {
+  it("returns dash when no outcome", () => {
+    expect(formatOutcome()).toBe("-");
+    expect(formatOutcome(undefined)).toBe("-");
+  });
+
+  it("returns 'full' for fully_completed", () => {
+    expect(formatOutcome("fully_completed")).toBe("full");
+  });
+
+  it("returns 'full' for case variations with 'fully'", () => {
+    expect(formatOutcome("Fully_completed")).toBe("full");
+  });
+
+  it("returns 'part' for partial", () => {
+    expect(formatOutcome("partial")).toBe("part");
+  });
+
+  it("returns 'no' for not_completed", () => {
+    expect(formatOutcome("not_completed")).toBe("no");
+  });
+
+  it("returns 'no' for failed", () => {
+    expect(formatOutcome("failed")).toBe("no");
+  });
+
+  it("returns first 4 chars for unknown outcomes", () => {
+    expect(formatOutcome("something_else")).toBe("some");
+    expect(formatOutcome("abcdefgh")).toBe("abcd");
+  });
+});
+
+// ── formatSessionType ────────────────────────────────────────
+
+describe("formatSessionType", () => {
+  it("returns dash when no type", () => {
+    expect(formatSessionType()).toBe("-");
+    expect(formatSessionType(undefined)).toBe("-");
+  });
+
+  it("maps coding to code", () => {
+    expect(formatSessionType("coding")).toBe("code");
+  });
+
+  it("maps debugging to debug", () => {
+    expect(formatSessionType("debugging")).toBe("debug");
+  });
+
+  it("maps analysis to anlys", () => {
+    expect(formatSessionType("analysis")).toBe("anlys");
+  });
+
+  it("maps planning to plan", () => {
+    expect(formatSessionType("planning")).toBe("plan");
+  });
+
+  it("maps review to rev", () => {
+    expect(formatSessionType("review")).toBe("rev");
+  });
+
+  it("maps documentation to docs", () => {
+    expect(formatSessionType("documentation")).toBe("docs");
+  });
+
+  it("maps research to rsrch", () => {
+    expect(formatSessionType("research")).toBe("rsrch");
+  });
+
+  it("maps iterative_refinement to iter", () => {
+    expect(formatSessionType("iterative_refinement")).toBe("iter");
+  });
+
+  it("maps configuration to cfg", () => {
+    expect(formatSessionType("configuration")).toBe("cfg");
+  });
+
+  it("maps troubleshooting to trbl", () => {
+    expect(formatSessionType("troubleshooting")).toBe("trbl");
+  });
+
+  it("handles case-insensitive input", () => {
+    expect(formatSessionType("Coding")).toBe("code");
+    expect(formatSessionType("DEBUGGING")).toBe("debug");
+  });
+
+  it("returns first 5 chars for unknown types", () => {
+    expect(formatSessionType("something_custom")).toBe("somet");
+    expect(formatSessionType("xyz")).toBe("xyz");
+  });
+});
+
+// ── formatHelpfulness ────────────────────────────────────────
+
+describe("formatHelpfulness", () => {
+  it("returns dash when no helpfulness", () => {
+    expect(formatHelpfulness()).toBe("-");
+    expect(formatHelpfulness(undefined)).toBe("-");
+  });
+
+  it("returns 'v.hi' for very_helpful", () => {
+    expect(formatHelpfulness("very_helpful")).toBe("v.hi");
+  });
+
+  it("returns 'v.hi' for any string starting with 'very'", () => {
+    expect(formatHelpfulness("Very_helpful")).toBe("v.hi");
+    expect(formatHelpfulness("very helpful")).toBe("v.hi");
+  });
+
+  it("returns 'hi' for helpful", () => {
+    expect(formatHelpfulness("helpful")).toBe("hi");
+  });
+
+  it("returns 'mid' for somewhat_helpful", () => {
+    expect(formatHelpfulness("somewhat_helpful")).toBe("mid");
+  });
+
+  it("returns 'low' for not_helpful", () => {
+    expect(formatHelpfulness("not_helpful")).toBe("low");
+  });
+
+  it("returns first 4 chars for unknown values", () => {
+    expect(formatHelpfulness("amazing")).toBe("amaz");
+    expect(formatHelpfulness("ok")).toBe("ok");
+  });
+});
+
+// ── primaryLanguage ──────────────────────────────────────────
+
+describe("primaryLanguage", () => {
+  it("returns dash when no languages", () => {
+    expect(primaryLanguage()).toBe("-");
+    expect(primaryLanguage(undefined)).toBe("-");
+  });
+
+  it("returns dash for empty object", () => {
+    expect(primaryLanguage({})).toBe("-");
+  });
+
+  it("returns the only language", () => {
+    expect(primaryLanguage({ TypeScript: 100 })).toBe("TypeS");
+  });
+
+  it("returns the language with highest count", () => {
+    expect(primaryLanguage({ TypeScript: 200, Python: 50, Rust: 10 })).toBe("TypeS");
+  });
+
+  it("truncates long language names to 5 chars", () => {
+    expect(primaryLanguage({ JavaScript: 100 })).toBe("JavaS");
+  });
+
+  it("returns short language names as-is", () => {
+    expect(primaryLanguage({ Go: 100 })).toBe("Go");
+    expect(primaryLanguage({ Rust: 100 })).toBe("Rust");
+    expect(primaryLanguage({ HTML: 50 })).toBe("HTML");
+  });
+
+  it("picks the top language when counts are different", () => {
+    expect(primaryLanguage({ Python: 300, Ruby: 200 })).toBe("Pytho");
+  });
+});
+
+// ── printTable ───────────────────────────────────────────────
+
+describe("printTable", () => {
+  it("prints header, divider, and rows to stdout", () => {
+    initColor("never");
+    const logs: string[] = [];
+    const origLog = console.log;
+    console.log = (...args: unknown[]) => logs.push(args.join(" "));
+
+    try {
+      printTable(
+        ["Name", "Age"],
+        [["Alice", "30"], ["Bob", "25"]],
+        [10, 5],
+        ["l", "r"],
+        2,
+      );
+    } finally {
+      console.log = origLog;
+    }
+
+    expect(logs.length).toBe(4); // header + divider + 2 rows
+    expect(logs[0]).toContain("Name");
+    expect(logs[0]).toContain("Age");
+    // Divider uses plain dashes in no-color mode
+    expect(logs[1]).toMatch(/^-+$/);
+    expect(logs[2]).toContain("Alice");
+    expect(logs[2]).toContain("30");
+    expect(logs[3]).toContain("Bob");
+    expect(logs[3]).toContain("25");
+  });
+
+  it("uses box-drawing chars for divider in color mode", () => {
+    initColor("always");
+    const logs: string[] = [];
+    const origLog = console.log;
+    console.log = (...args: unknown[]) => logs.push(args.join(" "));
+
+    try {
+      printTable(["X"], [["y"]], [5]);
+    } finally {
+      console.log = origLog;
+      initColor("never");
+    }
+
+    // Divider should use ─ (box-drawing horizontal)
+    expect(logs[1]).toContain("\u2500");
+  });
+
+  it("right-aligns columns when specified", () => {
+    initColor("never");
+    const logs: string[] = [];
+    const origLog = console.log;
+    console.log = (...args: unknown[]) => logs.push(args.join(" "));
+
+    try {
+      printTable(["Val"], [["42"]], [8], ["r"]);
+    } finally {
+      console.log = origLog;
+    }
+
+    // "42" right-aligned in 8 chars: "      42"
+    expect(logs[2]).toBe("      42");
   });
 });

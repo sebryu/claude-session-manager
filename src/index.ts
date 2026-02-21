@@ -135,7 +135,7 @@ const verbosityLevel = getVerbosityLevel();
 
 // ── Parse size strings ────────────────────────────────────────
 
-function parseSizeString(s: string): number | undefined {
+export function parseSizeString(s: string): number | undefined {
   const m = s.match(/^(\d+(?:\.\d+)?)\s*(B|KB|MB|GB)?$/i);
   if (!m) return undefined;
   const val = parseFloat(m[1] ?? "0");
@@ -146,12 +146,12 @@ function parseSizeString(s: string): number | undefined {
 
 // ── Session helpers ───────────────────────────────────────────
 
-function sessionTokens(s: EnrichedSession): number {
+export function sessionTokens(s: EnrichedSession): number {
   return (s.meta?.input_tokens ?? 0) + (s.meta?.output_tokens ?? 0)
     || (s.computedInputTokens ?? 0) + (s.computedOutputTokens ?? 0);
 }
 
-function sessionDuration(s: EnrichedSession): number | undefined {
+export function sessionDuration(s: EnrichedSession): number | undefined {
   return s.meta?.duration_minutes ?? s.computedDurationMinutes;
 }
 
@@ -1518,7 +1518,7 @@ function cmdColumns() {
   console.log(`  ${VERBOSE_COL_LEGEND}`);
 }
 
-function getSortFn(
+export function getSortFn(
   sortBy: string
 ): (a: EnrichedSession, b: EnrichedSession) => number {
   switch (sortBy) {

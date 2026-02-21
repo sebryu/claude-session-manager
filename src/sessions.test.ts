@@ -5,6 +5,9 @@ import { tmpdir } from "node:os";
 import {
   searchSessions,
   getAllSessions,
+  getSessionLabel,
+  deleteSession,
+  calculateSessionSize,
   type EnrichedSession,
   type SessionEntry,
 } from "./sessions.ts";
@@ -229,6 +232,560 @@ describe("parseJsonlSession via fixture JSONL", () => {
   });
 
   it("cleans up tmp dir after tests", async () => {
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+});
+
+// ── getSessionLabel ──────────────────────────────────────────
+
+describe("getSessionLabel", () => {
+  it("returns customTitle when set and is a real prompt", () => {
+    const session = makeSession({ customTitle: "My custom title" });
+    expect(getSessionLabel(session)).toBe("My custom title");
+  });
+
+  it("falls back to summary when no custom title", () => {
+    const session = makeSession({ summary: "Fixed the login bug", customTitle: undefined });
+    expect(getSessionLabel(session)).toBe("Fixed the login bug");
+  });
+
+  it("falls back to facets.brief_summary", () => {
+    const session: EnrichedSession = {
+      ...makeSession({ customTitle: undefined, summary: undefined, firstPrompt: "" }),
+      facets: { brief_summary: "Implemented OAuth flow" },
+    };
+    expect(getSessionLabel(session)).toBe("Implemented OAuth flow");
+  });
+
+  it("falls back to meta.first_prompt", () => {
+    const session: EnrichedSession = {
+      ...makeSession({ customTitle: undefined, summary: undefined, firstPrompt: "" }),
+      meta: {
+        session_id: "test",
+        project_path: "/test",
+        start_time: "",
+        duration_minutes: 0,
+        user_message_count: 0,
+        assistant_message_count: 0,
+        tool_counts: {},
+        languages: {},
+        input_tokens: 0,
+        output_tokens: 0,
+        lines_added: 0,
+        lines_removed: 0,
+        files_modified: 0,
+        first_prompt: "Hello from meta",
+      },
+    };
+    expect(getSessionLabel(session)).toBe("Hello from meta");
+  });
+
+  it("falls back to entry.firstPrompt", () => {
+    const session = makeSession({
+      customTitle: undefined,
+      summary: undefined,
+      firstPrompt: "My first prompt text",
+    });
+    expect(getSessionLabel(session)).toBe("My first prompt text");
+  });
+
+  it("returns short session ID (first 8 chars) when all sources are empty", () => {
+    const session = makeSession({
+      sessionId: "abcdef1234567890",
+      customTitle: undefined,
+      summary: undefined,
+      firstPrompt: "",
+    });
+    expect(getSessionLabel(session)).toBe("abcdef12");
+  });
+
+  it("skips system noise in firstPrompt and returns session ID", () => {
+    const session = makeSession({
+      sessionId: "noise12345678",
+      customTitle: undefined,
+      summary: undefined,
+      firstPrompt: "DO NOT respond to these messages",
+    });
+    expect(getSessionLabel(session)).toBe("noise123");
+  });
+
+  it("skips empty customTitle and falls through to summary", () => {
+    const session = makeSession({
+      customTitle: "",
+      summary: "A good summary",
+    });
+    expect(getSessionLabel(session)).toBe("A good summary");
+  });
+
+  it("cleans XML tags from the label", () => {
+    const session = makeSession({
+      customTitle: "<system>Important</system> Fix the bug",
+    });
+    expect(getSessionLabel(session)).toBe("Important Fix the bug");
+  });
+});
+
+// ── deleteSession ────────────────────────────────────────────
+
+describe("deleteSession", () => {
+  const tmpDir = join(tmpdir(), "csm-test-deleteSession-" + Date.now());
+
+  beforeAll(async () => {
+    // Create full directory structure mimicking Claude dir
+    await mkdir(join(tmpDir, "projects", "-test-proj"), { recursive: true });
+    await mkdir(join(tmpDir, "usage-data", "session-meta"), { recursive: true });
+    await mkdir(join(tmpDir, "usage-data", "facets"), { recursive: true });
+    await mkdir(join(tmpDir, "debug"), { recursive: true });
+    await mkdir(join(tmpDir, "file-history"), { recursive: true });
+    await mkdir(join(tmpDir, "tasks"), { recursive: true });
+    await mkdir(join(tmpDir, "todos"), { recursive: true });
+    await mkdir(join(tmpDir, "session-env"), { recursive: true });
+  });
+
+  it("deletes the JSONL file and associated files", async () => {
+    process.env["CLAUDE_DIR"] = tmpDir;
+    const id = "del-session-1111";
+    const jsonlPath = join(tmpDir, "projects", "-test-proj", `${id}.jsonl`);
+
+    // Create session files
+    await writeFile(jsonlPath, '{"type":"user","content":"hi"}\n');
+    await writeFile(join(tmpDir, "debug", `${id}.txt`), "debug log");
+    await mkdir(join(tmpDir, "file-history", id), { recursive: true });
+    await writeFile(join(tmpDir, "file-history", id, "file.txt"), "history");
+    await mkdir(join(tmpDir, "tasks", id), { recursive: true });
+    await writeFile(join(tmpDir, "tasks", id, "task.json"), "{}");
+    await writeFile(join(tmpDir, "usage-data", "session-meta", `${id}.json`), "{}");
+    await writeFile(join(tmpDir, "usage-data", "facets", `${id}.json`), "{}");
+
+    // Create index with this session
+    const indexPath = join(tmpDir, "projects", "-test-proj", "sessions-index.json");
+    await writeFile(
+      indexPath,
+      JSON.stringify({
+        version: 1,
+        originalPath: "/test",
+        entries: [
+          {
+            sessionId: id,
+            fullPath: jsonlPath,
+            fileMtime: Date.now(),
+            firstPrompt: "hi",
+            messageCount: 1,
+            created: new Date().toISOString(),
+            modified: new Date().toISOString(),
+            projectPath: "/test",
+            isSidechain: false,
+          },
+        ],
+      })
+    );
+
+    const session: EnrichedSession = {
+      entry: {
+        sessionId: id,
+        fullPath: jsonlPath,
+        fileMtime: Date.now(),
+        firstPrompt: "hi",
+        messageCount: 1,
+        created: new Date().toISOString(),
+        modified: new Date().toISOString(),
+        projectPath: "/test",
+        isSidechain: false,
+      },
+      totalSizeBytes: 100,
+      projectDirName: "-test-proj",
+    };
+
+    await deleteSession(session);
+
+    // Verify JSONL is deleted
+    const { stat: statFn } = await import("node:fs/promises");
+    await expect(statFn(jsonlPath)).rejects.toThrow();
+    // Verify debug log is deleted
+    await expect(statFn(join(tmpDir, "debug", `${id}.txt`))).rejects.toThrow();
+    // Verify file-history dir is deleted
+    await expect(statFn(join(tmpDir, "file-history", id))).rejects.toThrow();
+    // Verify tasks dir is deleted
+    await expect(statFn(join(tmpDir, "tasks", id))).rejects.toThrow();
+    // Verify meta file is deleted
+    await expect(statFn(join(tmpDir, "usage-data", "session-meta", `${id}.json`))).rejects.toThrow();
+    // Verify facets file is deleted
+    await expect(statFn(join(tmpDir, "usage-data", "facets", `${id}.json`))).rejects.toThrow();
+  });
+
+  it("updates the sessions-index.json atomically (removes the entry)", async () => {
+    process.env["CLAUDE_DIR"] = tmpDir;
+    const id = "del-session-2222";
+    const keepId = "keep-session-3333";
+    const jsonlPath = join(tmpDir, "projects", "-test-proj", `${id}.jsonl`);
+
+    // Create only the JSONL file for deletion target
+    await writeFile(jsonlPath, '{"type":"user","content":"bye"}\n');
+
+    // Create index with two sessions
+    const indexPath = join(tmpDir, "projects", "-test-proj", "sessions-index.json");
+    await writeFile(
+      indexPath,
+      JSON.stringify({
+        version: 1,
+        originalPath: "/test",
+        entries: [
+          {
+            sessionId: id,
+            fullPath: jsonlPath,
+            fileMtime: Date.now(),
+            firstPrompt: "bye",
+            messageCount: 1,
+            created: new Date().toISOString(),
+            modified: new Date().toISOString(),
+            projectPath: "/test",
+            isSidechain: false,
+          },
+          {
+            sessionId: keepId,
+            fullPath: "/fake/path.jsonl",
+            fileMtime: Date.now(),
+            firstPrompt: "stay",
+            messageCount: 1,
+            created: new Date().toISOString(),
+            modified: new Date().toISOString(),
+            projectPath: "/test",
+            isSidechain: false,
+          },
+        ],
+      })
+    );
+
+    const session: EnrichedSession = {
+      entry: {
+        sessionId: id,
+        fullPath: jsonlPath,
+        fileMtime: Date.now(),
+        firstPrompt: "bye",
+        messageCount: 1,
+        created: new Date().toISOString(),
+        modified: new Date().toISOString(),
+        projectPath: "/test",
+        isSidechain: false,
+      },
+      totalSizeBytes: 50,
+      projectDirName: "-test-proj",
+    };
+
+    await deleteSession(session);
+
+    // Read the updated index
+    const { readFile: readFileFn } = await import("node:fs/promises");
+    const updatedIndex = JSON.parse(await readFileFn(indexPath, "utf-8"));
+    expect(updatedIndex.entries.length).toBe(1);
+    expect(updatedIndex.entries[0].sessionId).toBe(keepId);
+  });
+
+  it("handles missing files gracefully (allSettled)", async () => {
+    process.env["CLAUDE_DIR"] = tmpDir;
+    const id = "del-session-missing-4444";
+    const jsonlPath = join(tmpDir, "projects", "-test-proj", `${id}.jsonl`);
+
+    // Do NOT create any files — everything is missing
+
+    // Create index without this session (so index update is still attempted)
+    const indexPath = join(tmpDir, "projects", "-test-proj", "sessions-index.json");
+    await writeFile(
+      indexPath,
+      JSON.stringify({ version: 1, originalPath: "/test", entries: [] })
+    );
+
+    const session: EnrichedSession = {
+      entry: {
+        sessionId: id,
+        fullPath: jsonlPath,
+        fileMtime: Date.now(),
+        firstPrompt: "ghost",
+        messageCount: 1,
+        created: new Date().toISOString(),
+        modified: new Date().toISOString(),
+        projectPath: "/test",
+        isSidechain: false,
+      },
+      totalSizeBytes: 0,
+      projectDirName: "-test-proj",
+    };
+
+    // Should not throw even though files don't exist (rm with force: true)
+    await deleteSession(session);
+    // If we got here without throwing, the test passes
+    expect(true).toBe(true);
+  });
+
+  it("deletes matching todo files", async () => {
+    process.env["CLAUDE_DIR"] = tmpDir;
+    const id = "del-session-todos-5555";
+    const jsonlPath = join(tmpDir, "projects", "-test-proj", `${id}.jsonl`);
+
+    // Create the JSONL and some todo files
+    await writeFile(jsonlPath, '{"type":"user","content":"todo test"}\n');
+    await writeFile(join(tmpDir, "todos", id), "todo exact match");
+    await writeFile(join(tmpDir, "todos", `${id}-subtask`), "todo with dash prefix");
+    await writeFile(join(tmpDir, "todos", `${id}.json`), "todo with dot prefix");
+    await writeFile(join(tmpDir, "todos", "unrelated-todo"), "should not be deleted");
+
+    const indexPath = join(tmpDir, "projects", "-test-proj", "sessions-index.json");
+    await writeFile(
+      indexPath,
+      JSON.stringify({ version: 1, originalPath: "/test", entries: [] })
+    );
+
+    const session: EnrichedSession = {
+      entry: {
+        sessionId: id,
+        fullPath: jsonlPath,
+        fileMtime: Date.now(),
+        firstPrompt: "todo test",
+        messageCount: 1,
+        created: new Date().toISOString(),
+        modified: new Date().toISOString(),
+        projectPath: "/test",
+        isSidechain: false,
+      },
+      totalSizeBytes: 50,
+      projectDirName: "-test-proj",
+    };
+
+    await deleteSession(session);
+
+    const { stat: statFn } = await import("node:fs/promises");
+    // All matching todo files should be deleted
+    await expect(statFn(join(tmpDir, "todos", id))).rejects.toThrow();
+    await expect(statFn(join(tmpDir, "todos", `${id}-subtask`))).rejects.toThrow();
+    await expect(statFn(join(tmpDir, "todos", `${id}.json`))).rejects.toThrow();
+    // Unrelated todo should still exist
+    const unrelated = await statFn(join(tmpDir, "todos", "unrelated-todo"));
+    expect(unrelated.isFile()).toBe(true);
+  });
+
+  it("cleans up tmp dir after deleteSession tests", async () => {
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+});
+
+// ── JSONL parsing edge cases via getAllSessions ──────────────
+
+describe("JSONL parsing edge cases", () => {
+  const tmpDir = join(tmpdir(), "csm-test-jsonl-edges-" + Date.now());
+
+  beforeAll(async () => {
+    await mkdir(join(tmpDir, "projects", "-edge-dir"), { recursive: true });
+    await writeFile(
+      join(tmpDir, "projects", "-edge-dir", "sessions-index.json"),
+      JSON.stringify({ version: 1, originalPath: "/edge", entries: [] })
+    );
+  });
+
+  it("extracts firstPrompt from array content in user message", async () => {
+    process.env["CLAUDE_DIR"] = tmpDir;
+    const id = "array-content-session";
+    const content = [
+      JSON.stringify({
+        type: "user",
+        role: "user",
+        content: [
+          { type: "text", text: "Hello from array content" },
+          { type: "image", source: "data:image/png;base64,..." },
+        ],
+        cwd: "/test",
+        timestamp: "2024-01-01T00:00:00Z",
+      }),
+      JSON.stringify({
+        type: "assistant",
+        role: "assistant",
+        message: { content: "Got it", usage: { input_tokens: 10, output_tokens: 5 } },
+        timestamp: "2024-01-01T00:00:05Z",
+      }),
+    ].join("\n");
+    await writeFile(join(tmpDir, "projects", "-edge-dir", `${id}.jsonl`), content);
+
+    const sessions = await getAllSessions();
+    const session = sessions.find((s) => s.entry.sessionId === id);
+    expect(session).toBeDefined();
+    expect(session?.entry.firstPrompt).toBe("Hello from array content");
+  });
+
+  it("extracts customTitle from custom-title type message", async () => {
+    process.env["CLAUDE_DIR"] = tmpDir;
+    const id = "custom-title-session";
+    const content = [
+      JSON.stringify({
+        type: "custom-title",
+        customTitle: "My Special Session",
+      }),
+      JSON.stringify({
+        type: "user",
+        role: "user",
+        content: "Do something",
+        cwd: "/test",
+        timestamp: "2024-01-01T00:00:00Z",
+      }),
+      JSON.stringify({
+        type: "assistant",
+        role: "assistant",
+        message: { content: "Done", usage: { input_tokens: 10, output_tokens: 5 } },
+        timestamp: "2024-01-01T00:00:05Z",
+      }),
+    ].join("\n");
+    await writeFile(join(tmpDir, "projects", "-edge-dir", `${id}.jsonl`), content);
+
+    const sessions = await getAllSessions();
+    const session = sessions.find((s) => s.entry.sessionId === id);
+    expect(session).toBeDefined();
+    expect(session?.entry.customTitle).toBe("My Special Session");
+  });
+
+  it("uses message.timestamp when top-level timestamp is absent", async () => {
+    process.env["CLAUDE_DIR"] = tmpDir;
+    const id = "nested-timestamp-session";
+    const content = [
+      JSON.stringify({
+        type: "user",
+        role: "user",
+        content: "Nested timestamps",
+        cwd: "/test",
+        message: { timestamp: "2024-06-15T10:00:00Z" },
+      }),
+      JSON.stringify({
+        type: "assistant",
+        role: "assistant",
+        message: {
+          content: "Response",
+          timestamp: "2024-06-15T10:05:00Z",
+          usage: { input_tokens: 10, output_tokens: 5 },
+        },
+      }),
+    ].join("\n");
+    await writeFile(join(tmpDir, "projects", "-edge-dir", `${id}.jsonl`), content);
+
+    const sessions = await getAllSessions();
+    const session = sessions.find((s) => s.entry.sessionId === id);
+    expect(session).toBeDefined();
+    expect(session?.entry.created).toBe("2024-06-15T10:00:00Z");
+    expect(session?.entry.modified).toBe("2024-06-15T10:05:00Z");
+  });
+
+  it("falls back to file birthtime when no timestamps exist", async () => {
+    process.env["CLAUDE_DIR"] = tmpDir;
+    const id = "no-timestamp-session";
+    const content = [
+      JSON.stringify({
+        type: "user",
+        role: "user",
+        content: "No timestamp here",
+        cwd: "/test",
+      }),
+    ].join("\n");
+    const filePath = join(tmpDir, "projects", "-edge-dir", `${id}.jsonl`);
+    await writeFile(filePath, content);
+
+    const sessions = await getAllSessions();
+    const session = sessions.find((s) => s.entry.sessionId === id);
+    expect(session).toBeDefined();
+    // created and modified should be ISO strings (file birthtime/mtime)
+    expect(session?.entry.created).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(session?.entry.modified).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    // They should be recent (within last minute) since we just created the file
+    const createdTime = new Date(session!.entry.created).getTime();
+    expect(Date.now() - createdTime).toBeLessThan(60_000);
+  });
+
+  it("computes duration from timestamps", async () => {
+    process.env["CLAUDE_DIR"] = tmpDir;
+    const id = "duration-compute-session";
+    const content = [
+      JSON.stringify({
+        type: "user",
+        role: "user",
+        content: "Start",
+        cwd: "/test",
+        timestamp: "2024-01-01T00:00:00Z",
+      }),
+      JSON.stringify({
+        type: "assistant",
+        role: "assistant",
+        message: { content: "End", usage: { input_tokens: 10, output_tokens: 5 } },
+        timestamp: "2024-01-01T00:10:00Z",
+      }),
+    ].join("\n");
+    await writeFile(join(tmpDir, "projects", "-edge-dir", `${id}.jsonl`), content);
+
+    const sessions = await getAllSessions();
+    const session = sessions.find((s) => s.entry.sessionId === id);
+    expect(session).toBeDefined();
+    expect(session?.computedDurationMinutes).toBe(10);
+  });
+
+  it("cleans up tmp dir after JSONL edge case tests", async () => {
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+});
+
+// ── calculateSessionSize ─────────────────────────────────────
+
+describe("calculateSessionSize", () => {
+  const tmpDir = join(tmpdir(), "csm-test-calcSize-" + Date.now());
+
+  beforeAll(async () => {
+    await mkdir(join(tmpDir, "debug"), { recursive: true });
+    await mkdir(join(tmpDir, "file-history"), { recursive: true });
+    await mkdir(join(tmpDir, "tasks"), { recursive: true });
+    await mkdir(join(tmpDir, "usage-data", "session-meta"), { recursive: true });
+    await mkdir(join(tmpDir, "usage-data", "facets"), { recursive: true });
+  });
+
+  it("sums sizes of JSONL, debug, file-history, tasks, meta, and facets", async () => {
+    process.env["CLAUDE_DIR"] = tmpDir;
+    const id = "size-session-1111";
+    const jsonlPath = join(tmpDir, `${id}.jsonl`);
+
+    // Create files with known content sizes
+    const jsonlContent = "A".repeat(100);
+    const debugContent = "B".repeat(50);
+    const metaContent = "C".repeat(30);
+    const facetsContent = "D".repeat(20);
+
+    await writeFile(jsonlPath, jsonlContent);
+    await writeFile(join(tmpDir, "debug", `${id}.txt`), debugContent);
+    await mkdir(join(tmpDir, "file-history", id), { recursive: true });
+    await writeFile(join(tmpDir, "file-history", id, "a.txt"), "E".repeat(40));
+    await mkdir(join(tmpDir, "tasks", id), { recursive: true });
+    await writeFile(join(tmpDir, "tasks", id, "t.json"), "F".repeat(25));
+    await writeFile(join(tmpDir, "usage-data", "session-meta", `${id}.json`), metaContent);
+    await writeFile(join(tmpDir, "usage-data", "facets", `${id}.json`), facetsContent);
+
+    const size = await calculateSessionSize(id, jsonlPath);
+    // 100 + 50 + 40 + 25 + 30 + 20 = 265
+    expect(size).toBe(265);
+  });
+
+  it("returns only JSONL size when no other files exist", async () => {
+    process.env["CLAUDE_DIR"] = tmpDir;
+    const id = "size-session-only-jsonl";
+    const jsonlPath = join(tmpDir, `${id}.jsonl`);
+
+    await writeFile(jsonlPath, "X".repeat(200));
+
+    const size = await calculateSessionSize(id, jsonlPath);
+    expect(size).toBe(200);
+  });
+
+  it("returns 0 when JSONL does not exist", async () => {
+    process.env["CLAUDE_DIR"] = tmpDir;
+    const id = "size-session-nonexistent";
+    const jsonlPath = join(tmpDir, `${id}.jsonl`);
+    // Don't create the file
+
+    const size = await calculateSessionSize(id, jsonlPath);
+    expect(size).toBe(0);
+  });
+
+  it("cleans up tmp dir after calculateSessionSize tests", async () => {
     await rm(tmpDir, { recursive: true, force: true });
   });
 });
