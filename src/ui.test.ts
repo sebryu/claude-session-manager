@@ -153,8 +153,26 @@ describe("formatLines", () => {
     expect(formatLines(716, 29)).toBe("+716/-29");
   });
 
+  it("handles only additions", () => {
+    expect(formatLines(100, 0)).toBe("+100/-0");
+  });
+
+  it("handles only removals", () => {
+    expect(formatLines(0, 50)).toBe("+0/-50");
+  });
+
   it("abbreviates thousands with k", () => {
     expect(formatLines(1200, 0)).toBe("+1k/-0");
+    expect(formatLines(1000, 2000)).toBe("+1k/-2k");
+  });
+
+  it("rounds thousands", () => {
+    expect(formatLines(1500, 2500)).toBe("+2k/-3k");
+  });
+
+  it("mixes small and large numbers", () => {
+    expect(formatLines(500, 3000)).toBe("+500/-3k");
+    expect(formatLines(5000, 42)).toBe("+5k/-42");
   });
 });
 
@@ -527,39 +545,6 @@ describe("parseProjectPath", () => {
   it("returns undefined worktree for non-worktree path (not present in result)", () => {
     const result = parseProjectPath("/Users/me/my-project");
     expect(result.worktree).toBeUndefined();
-  });
-});
-
-// ── formatLines ──────────────────────────────────────────────
-
-describe("formatLines", () => {
-  it("returns dash when both are 0", () => {
-    expect(formatLines(0, 0)).toBe("-");
-  });
-
-  it("formats small numbers", () => {
-    expect(formatLines(10, 5)).toBe("+10/-5");
-  });
-
-  it("handles only additions", () => {
-    expect(formatLines(100, 0)).toBe("+100/-0");
-  });
-
-  it("handles only removals", () => {
-    expect(formatLines(0, 50)).toBe("+0/-50");
-  });
-
-  it("formats thousands with k suffix", () => {
-    expect(formatLines(1000, 2000)).toBe("+1k/-2k");
-  });
-
-  it("rounds thousands", () => {
-    expect(formatLines(1500, 2500)).toBe("+2k/-3k");
-  });
-
-  it("mixes small and large numbers", () => {
-    expect(formatLines(500, 3000)).toBe("+500/-3k");
-    expect(formatLines(5000, 42)).toBe("+5k/-42");
   });
 });
 
