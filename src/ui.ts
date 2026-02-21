@@ -90,17 +90,17 @@ export function padLeft(str: string, width: number): string {
 }
 
 /**
- * Compute the 4 flexible column widths [name, project, session, branch] for
+ * Compute the 5 flexible column widths [name, project, worktree, session, branch] for
  * the session list table given the available terminal width.
  *
  * Fixed columns (ID=36, Date=11, Dur=5, Msgs=5, Tokens=7, Size=7) plus the
- * 9 two-space separators between 10 columns sum to 89 chars. The remainder
+ * 10 two-space separators between 11 columns sum to 91 chars. The remainder
  * is distributed proportionally among the flexible columns.
  */
-export function computeListColWidths(termWidth: number): [number, number, number, number] {
-  const FIXED_TOTAL = 36 + 11 + 5 + 5 + 7 + 7 + 9 * 2; // 89
-  const MIN: [number, number, number, number] = [10, 12, 18, 8]; // name, project, session, branch
-  const WEIGHTS: [number, number, number, number] = [0.15, 0.22, 0.40, 0.23]; // sum = 1.00
+export function computeListColWidths(termWidth: number): [number, number, number, number, number] {
+  const FIXED_TOTAL = 36 + 11 + 5 + 5 + 7 + 7 + 10 * 2; // 91
+  const MIN: [number, number, number, number, number] = [8, 12, 10, 18, 8]; // name, project, worktree, session, branch
+  const WEIGHTS: [number, number, number, number, number] = [0.10, 0.20, 0.13, 0.37, 0.20]; // sum = 1.00
 
   const available = termWidth - FIXED_TOTAL;
   const minTotal = MIN.reduce((a, b) => a + b, 0);
@@ -108,7 +108,7 @@ export function computeListColWidths(termWidth: number): [number, number, number
 
   return MIN.map((min, i) =>
     Math.max(min, Math.round(WEIGHTS[i]! * flexSpace))
-  ) as [number, number, number, number];
+  ) as [number, number, number, number, number];
 }
 
 /** Print a table with column headers and rows */
@@ -148,4 +148,18 @@ export function projectName(path: string): string {
     return parts.slice(-2).join("/");
   }
   return last;
+}
+
+const WORKTREE_MARKER = "/.claude/worktrees/";
+
+/** Parse a project path into base project name and optional worktree name */
+export function parseProjectPath(path: string): { project: string; worktree?: string } {
+  const idx = path.indexOf(WORKTREE_MARKER);
+  if (idx !== -1) {
+    return {
+      project: projectName(path.slice(0, idx)),
+      worktree: path.slice(idx + WORKTREE_MARKER.length),
+    };
+  }
+  return { project: projectName(path) };
 }

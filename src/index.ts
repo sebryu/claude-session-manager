@@ -19,6 +19,7 @@ import {
   relativeDate,
   printTable,
   projectName,
+  parseProjectPath,
   padLeft,
   computeListColWidths,
 } from "./ui.ts";
@@ -113,22 +114,24 @@ async function cmdList() {
   if (verbose) {
     printVerboseList(displayed);
   } else {
-    const headers = ["ID", "Name", "Project", "Session", "Branch", "Date", "Dur", "Msgs", "Tokens", "Size"];
+    const headers = ["ID", "Name", "Project", "Worktree", "Session", "Branch", "Date", "Dur", "Msgs", "Tokens", "Size"];
     const termWidth = process.stdout.columns ?? 160;
-    const [wName, wProject, wSession, wBranch] = computeListColWidths(termWidth);
-    const colWidths = [36, wName, wProject, wSession, wBranch, 11, 5, 5, 7, 7];
-    const aligns: ("l" | "r")[] = ["l", "l", "l", "l", "l", "l", "r", "r", "r", "r"];
+    const [wName, wProject, wWorktree, wSession, wBranch] = computeListColWidths(termWidth);
+    const colWidths = [36, wName, wProject, wWorktree, wSession, wBranch, 11, 5, 5, 7, 7];
+    const aligns: ("l" | "r")[] = ["l", "l", "l", "l", "l", "l", "l", "r", "r", "r", "r"];
 
     const rows = displayed.map((s) => {
       const tokens = (s.meta?.input_tokens ?? 0) + (s.meta?.output_tokens ?? 0)
         || (s.computedInputTokens ?? 0) + (s.computedOutputTokens ?? 0);
       const duration = s.meta?.duration_minutes ?? s.computedDurationMinutes;
+      const { project, worktree } = parseProjectPath(s.entry.projectPath);
       return [
         s.entry.sessionId,
         truncate(s.entry.customTitle || "-", colWidths[1]!),
-        truncate(projectName(s.entry.projectPath), colWidths[2]!),
-        truncate(getSessionLabel(s), colWidths[3]!),
-        truncate(s.entry.gitBranch ?? "-", colWidths[4]!),
+        truncate(project, colWidths[2]!),
+        truncate(worktree ?? "-", colWidths[3]!),
+        truncate(getSessionLabel(s), colWidths[4]!),
+        truncate(s.entry.gitBranch ?? "-", colWidths[5]!),
         relativeDate(s.entry.modified),
         duration != null && duration > 0
           ? formatDurationShort(duration)
