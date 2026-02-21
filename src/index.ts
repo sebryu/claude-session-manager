@@ -51,8 +51,17 @@ function hasFlag(long: string, short?: string): boolean {
   return false;
 }
 
-const verbose = hasFlag("verbose", "v");
-const verboseTable = args.includes("--verbose-table") || args.includes("-vt");
+function getVerbosityLevel(): number {
+  let level = 0;
+  for (const arg of args) {
+    if (arg === "--verbose") level += 1;
+    else if (/^-v+$/.test(arg)) level += arg.length - 1;
+    else if (arg === "-vt" || arg === "--verbose-table") level = Math.max(level, 2);
+  }
+  return level;
+}
+
+const verbosityLevel = getVerbosityLevel();
 
 // ── Session helpers ───────────────────────────────────────────
 
@@ -68,6 +77,14 @@ function sessionDuration(s: EnrichedSession): number | undefined {
 // ── Column definitions ────────────────────────────────────────
 // Single source of truth for header label, alignment, and sizing.
 // See docs/columns.md for full documentation of each column.
+
+const MINIMAL_COLS: ColSpec[] = [
+  { header: "ID",      align: "l", min: 8  },
+  { header: "Project", align: "l", min: 10, weight: 0.25 },
+  { header: "Session", align: "l", min: 16, weight: 0.60 },
+  { header: "Date",    align: "l", min: 11 },
+  { header: "Msgs",    align: "r", min: 4  },
+];
 
 const LIST_COLS: ColSpec[] = [
   { header: "ID",       align: "l", min: 36 },
@@ -163,12 +180,14 @@ async function cmdList() {
 
   const displayed = limit ? sessions.slice(0, limit) : sessions;
 
-  if (verbose) {
+  if (verbosityLevel >= 3) {
     printVerboseList(displayed);
-  } else if (verboseTable) {
+  } else if (verbosityLevel >= 2) {
     printVerboseTable(displayed);
-  } else {
+  } else if (verbosityLevel >= 1) {
     printListTable(displayed);
+  } else {
+    printMinimalTable(displayed);
   }
 
   if (limit && limit < totalCount) {
@@ -180,6 +199,29 @@ async function cmdList() {
   const totalHours = Math.round(totalDuration / 60);
   console.log(
     `\n${c.dim}${totalCount} sessions \u00b7 ${formatBytes(totalSize)} \u00b7 ${formatTokens(totalTokens)} tokens \u00b7 ${totalHours}h total${c.reset}`
+  );
+}
+
+function printMinimalTable(sessions: EnrichedSession[]) {
+  const termWidth = process.stdout.columns ?? 120;
+  const widths = computeColWidths(termWidth, MINIMAL_COLS, 2);
+
+  const rows = sessions.map((s) => {
+    const { project } = parseProjectPath(s.entry.projectPath);
+    return [
+      s.entry.sessionId.slice(0, 8),
+      truncate(project, widths[1]!),
+      truncate(getSessionLabel(s), widths[2]!),
+      relativeDate(s.entry.modified),
+      String(s.entry.messageCount),
+    ];
+  });
+
+  printTable(
+    MINIMAL_COLS.map((col) => col.header),
+    rows,
+    widths,
+    MINIMAL_COLS.map((col) => col.align)
   );
 }
 
@@ -392,8 +434,12 @@ async function cmdFind() {
     `${c.dim}Found ${c.white}${results.length}${c.dim} matching session(s)${c.reset}\n`
   );
 
-  if (verbose) {
+  if (verbosityLevel >= 3) {
     printVerboseList(results.slice(0, 15));
+  } else if (verbosityLevel >= 2) {
+    printVerboseTable(results.slice(0, 15));
+  } else if (verbosityLevel >= 1) {
+    printListTable(results.slice(0, 15));
   } else {
     for (const s of results.slice(0, 15)) {
       const label = getSessionLabel(s);
@@ -684,20 +730,20 @@ ${c.cyan}${c.bold}csm${c.reset} - Claude Session Manager
 ${c.bold}USAGE${c.reset}
   csm [command] [options]
 
-${c.bold}GLOBAL OPTIONS${c.reset}
-  -v, --verbose         Show detailed output with all available data
-
 ${c.bold}COMMANDS${c.reset}
   ${c.green}list${c.reset}, ${c.green}l${c.reset}              List all sessions (default)
     -p, --project <name>  Filter by project name
     -s, --sort <key>      Sort by: date, size, tokens, duration
     -n, --limit <N>       Show only the first N sessions
-    -v, --verbose         Card-style output with full details
-    -vt, --verbose-table  Wide table with all available columns
+    -v                    Standard table (ID, project, session, date, stats)
+    -vv                   Wide table with all available columns
+    -vvv                  Card-style output with full details
 
   ${c.green}find${c.reset}, ${c.green}f${c.reset} <query>       Search sessions by description
     Searches summaries, prompts, goals, and branch names
-    -v, --verbose         Card-style output with full details
+    -v                    Standard table (ID, project, session, date, stats)
+    -vv                   Wide table with all available columns
+    -vvv                  Card-style output with full details
 
   ${c.green}info${c.reset}, ${c.green}i${c.reset} <session-id>  Show detailed session information
     Accepts partial session IDs (8 chars is enough)
@@ -709,13 +755,15 @@ ${c.bold}COMMANDS${c.reset}
   ${c.green}help${c.reset}              Show this help message
 
 ${c.bold}EXAMPLES${c.reset}
-  csm                           List all sessions (full IDs & names)
-  csm l -v                      List with verbose card output
-  csm l -vt                     List with all columns (wide table)
+  csm                           List all sessions (minimal view)
+  csm l -v                      List with standard table (all stats)
+  csm l -vv                     List with all columns (wide table)
+  csm l -vvv                    List with verbose card output
   csm l -s size -n 20           Top 20 sessions by size
   csm l -s tokens               Sort by token usage
   csm f "expo upgrade"          Find sessions about expo upgrades
-  csm f "expo upgrade" -v       Find with verbose detail cards
+  csm f "expo upgrade" -v       Find with standard table
+  csm f "expo upgrade" -vvv     Find with verbose detail cards
   csm i dfde9d19                Show session details (partial ID)
   csm c --older-than 30         Clean sessions older than 30 days
 
