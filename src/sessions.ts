@@ -7,8 +7,6 @@ import { homedir } from "node:os";
 // Dynamic accessors — read process.env each call so tests can override via process.env["CLAUDE_DIR"]
 export function getClaudeDir(): string { return process.env["CLAUDE_DIR"] ?? join(homedir(), ".claude"); }
 
-// Backward-compatible alias (evaluated at call sites, not at module load)
-export const CLAUDE_DIR = getClaudeDir();
 
 function projectsDir(): string { return join(getClaudeDir(), "projects"); }
 function debugDir(): string { return join(getClaudeDir(), "debug"); }

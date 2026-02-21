@@ -175,14 +175,12 @@ describe("getAllSessions with fixtures", () => {
 // ── parseJsonlSession (via getAllSessions) ─────────────────────
 
 describe("parseJsonlSession via fixture JSONL", () => {
-  // NOTE: Bun runs ALL beforeAll hooks before any tests run, so we cannot use beforeAll
-  // to set CLAUDE_DIR reliably. Instead, each test sets it explicitly and manages its own
-  // tmpDir. We use a shared tmpDir path derived deterministically from the test file name.
+  // beforeAll sets up the shared tmpDir structure. Each test then sets CLAUDE_DIR = tmpDir
+  // explicitly so that other describe blocks running concurrently don't interfere.
   const tmpDir = join(tmpdir(), "csm-test-parseJsonl");
 
   beforeAll(async () => {
-    // Create the tmpDir structure. Bun runs this before any tests but we only use tmpDir
-    // for writes/reads inside each test which explicitly set CLAUDE_DIR = tmpDir.
+    // Create the tmpDir structure for JSONL parsing tests.
     await mkdir(join(tmpDir, "projects", "-test-dir"), { recursive: true });
     await writeFile(
       join(tmpDir, "projects", "-test-dir", "sessions-index.json"),

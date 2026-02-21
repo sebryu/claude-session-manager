@@ -592,6 +592,7 @@ async function cmdFind() {
   const outputIds = hasFlag("ids-only");
   const reverse = hasFlag("reverse", "r");
   const exitOnEmpty = hasFlag("exit-2-on-empty");
+  const limit = getConfigLimit();
 
   if (!query) {
     console.error(`${c.red}Usage: csm find <search query>${c.reset}`);
@@ -618,11 +619,11 @@ async function cmdFind() {
   }
 
   if (outputJson) {
-    console.log(JSON.stringify(results.slice(0, 15), null, 2));
+    console.log(JSON.stringify(results.slice(0, limit), null, 2));
     return;
   }
   if (outputIds) {
-    for (const s of results.slice(0, 15)) console.log(s.entry.sessionId);
+    for (const s of results.slice(0, limit)) console.log(s.entry.sessionId);
     return;
   }
 
@@ -631,13 +632,13 @@ async function cmdFind() {
   );
 
   if (verbosityLevel >= 3) {
-    printVerboseList(results.slice(0, 15));
+    printVerboseList(results.slice(0, limit));
   } else if (verbosityLevel >= 2) {
-    printVerboseTable(results.slice(0, 15));
+    printVerboseTable(results.slice(0, limit));
   } else if (verbosityLevel >= 1) {
-    printListTable(results.slice(0, 15));
+    printListTable(results.slice(0, limit));
   } else {
-    for (const s of results.slice(0, 15)) {
+    for (const s of results.slice(0, limit)) {
       const label = getSessionLabel(s);
       const proj = projectName(s.entry.projectPath);
       const tok = sessionTokens(s);
@@ -902,11 +903,6 @@ async function cmdClean() {
     return;
   }
 
-  // Optional pre-filter step
-  let filteredChoices = choices;
-  const filterSessions = sessions;
-  void filterSessions; // used via filteredChoices
-
   console.log(
     `${c.dim}Use arrow keys to navigate, space to select, enter to confirm${c.reset}\n`
   );
@@ -915,7 +911,7 @@ async function cmdClean() {
   try {
     selected = await checkbox({
       message: "Select sessions to delete:",
-      choices: filteredChoices,
+      choices,
       pageSize: 20,
       loop: false,
     });
@@ -1250,7 +1246,16 @@ async function cmdExport() {
 
 async function cmdBackup() {
   const olderThanStr = getFlag("older-than");
-  const destArg = args.find((a) => !a.startsWith("-") && a !== "backup");
+  const longFlagValues = new Set<string>();
+  for (let i = 0; i < args.length; i++) {
+    if ((args[i] ?? "").startsWith("--") && i + 1 < args.length) {
+      const next = args[i + 1];
+      if (next && !next.startsWith("-")) longFlagValues.add(next);
+    }
+  }
+  const destArg = args.find(
+    (a) => !a.startsWith("-") && a !== "backup" && !longFlagValues.has(a)
+  );
 
   if (!destArg) {
     process.stderr.write(`${c.red}Usage: csm backup --older-than <days> <destination-dir>${c.reset}\n`);

@@ -1,7 +1,7 @@
 // ANSI color helpers
 
 /** Whether color output is enabled. Call initColor() at startup to configure. */
-export let useColor = true;
+let useColor = true;
 
 /**
  * Initialize color mode. Call once at startup before any output.
