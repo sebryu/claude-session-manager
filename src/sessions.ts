@@ -103,6 +103,8 @@ export interface EnrichedSession {
   /** Tokens summed from JSONL message.usage (fallback when meta unavailable) */
   computedInputTokens?: number;
   computedOutputTokens?: number;
+  /** Session was started but never received a user message (startup debris) */
+  isAborted?: boolean;
 }
 
 async function fileSize(path: string): Promise<number> {
@@ -457,6 +459,7 @@ export async function getAllSessions(
         computedDurationMinutes,
         computedInputTokens: raw.computedInputTokens,
         computedOutputTokens: raw.computedOutputTokens,
+        isAborted: raw.entry.messageCount === 0,
       };
     })
   );
@@ -469,6 +472,7 @@ export async function getAllSessions(
 }
 
 export function getSessionLabel(session: EnrichedSession): string {
+  if (session.isAborted) return "[aborted]";
   // Try each source, skipping system noise
   for (const src of [
     session.entry.customTitle,

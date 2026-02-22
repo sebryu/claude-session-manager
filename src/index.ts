@@ -942,6 +942,7 @@ async function cmdInfo() {
 async function cmdClean() {
   const olderThanStr = getFlag("older-than");
   const dryRun = hasFlag("dry-run");
+  const abortedOnly = hasFlag("aborted");
 
   let olderThanDays: number | undefined;
   if (olderThanStr) {
@@ -954,11 +955,24 @@ async function cmdClean() {
 
   console.log(`${c.cyan}${c.bold}Claude Session Cleaner${c.reset}\n`);
 
-  const sessions = await getAllSessions(makeProgressCallback());
+  let sessions = await getAllSessions(makeProgressCallback());
 
   if (sessions.length === 0) {
     console.log(`${c.yellow}No sessions found.${c.reset}`);
     return;
+  }
+
+  // --aborted: filter to only aborted sessions, pre-select all
+  if (abortedOnly) {
+    sessions = sessions.filter((s) => s.isAborted);
+    if (sessions.length === 0) {
+      console.log(`${c.green}No aborted sessions found.${c.reset}`);
+      return;
+    }
+    const totalSize = sessions.reduce((a, s) => a + s.totalSizeBytes, 0);
+    console.log(
+      `${c.dim}Found ${c.yellow}${sessions.length}${c.dim} aborted session(s) (${formatBytes(totalSize)})${c.reset}\n`
+    );
   }
 
   // Sort by date, oldest first
@@ -969,7 +983,9 @@ async function cmdClean() {
   );
 
   let preSelectedIds: Set<string> | undefined;
-  if (olderThanDays !== undefined) {
+  if (abortedOnly) {
+    preSelectedIds = new Set(sessions.map((s) => s.entry.sessionId));
+  } else if (olderThanDays !== undefined) {
     const cutoff = Date.now() - olderThanDays * 24 * 60 * 60 * 1000;
     preSelectedIds = new Set(
       sessions
@@ -1594,6 +1610,7 @@ ${c.bold}COMMANDS${c.reset}
 
   ${c.green}clean${c.reset}, ${c.green}c${c.reset}             Interactively select and remove sessions
     --older-than <days>      Pre-select sessions older than N days
+    --aborted                Show only aborted (0-message) sessions, pre-select all
     --dry-run                Preview without deleting
 
   ${c.green}interactive${c.reset}, ${c.green}browse${c.reset}, ${c.green}b${c.reset}  Browse sessions, resume or delete
@@ -1634,6 +1651,8 @@ ${c.bold}EXAMPLES${c.reset}
   csm f "expo upgrade"               Search sessions
   csm i dfde9d19                     Show session details
   csm c --older-than 30              Clean sessions older than 30 days
+  csm c --aborted                    Remove aborted (ghost) sessions
+  csm c --aborted --dry-run          Preview aborted sessions
   csm export dfde9d19 ./backups/     Export single session
   csm backup --older-than 60 ./arch/ Backup old sessions
   csm stats --by language            Stats grouped by language

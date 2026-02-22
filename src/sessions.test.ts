@@ -323,6 +323,22 @@ describe("getSessionLabel", () => {
     });
     expect(getSessionLabel(session)).toBe("Important Fix the bug");
   });
+
+  it("returns [aborted] for aborted sessions", () => {
+    const session: EnrichedSession = {
+      ...makeSession({ messageCount: 0, firstPrompt: "No prompt" }),
+      isAborted: true,
+    };
+    expect(getSessionLabel(session)).toBe("[aborted]");
+  });
+
+  it("returns [aborted] even when customTitle exists on an aborted session", () => {
+    const session: EnrichedSession = {
+      ...makeSession({ messageCount: 0, customTitle: "Some title" }),
+      isAborted: true,
+    };
+    expect(getSessionLabel(session)).toBe("[aborted]");
+  });
 });
 
 // ── deleteSession ────────────────────────────────────────────
@@ -719,6 +735,35 @@ describe("JSONL parsing edge cases", () => {
     const session = sessions.find((s) => s.entry.sessionId === id);
     expect(session).toBeDefined();
     expect(session?.computedDurationMinutes).toBe(10);
+  });
+
+  it("marks session with only file-history-snapshot entries as aborted", async () => {
+    process.env["CLAUDE_DIR"] = tmpDir;
+    const id = "aborted-ghost-session";
+    const content = [
+      JSON.stringify({
+        type: "file-history-snapshot",
+        messageId: "some-uuid",
+        snapshot: { messageId: "some-uuid", trackedFileBackups: {}, timestamp: "2024-01-01T00:00:00Z" },
+        isSnapshotUpdate: false,
+      }),
+    ].join("\n");
+    await writeFile(join(tmpDir, "projects", "-edge-dir", `${id}.jsonl`), content);
+
+    const sessions = await getAllSessions();
+    const session = sessions.find((s) => s.entry.sessionId === id);
+    expect(session).toBeDefined();
+    expect(session?.entry.messageCount).toBe(0);
+    expect(session?.isAborted).toBe(true);
+    expect(getSessionLabel(session!)).toBe("[aborted]");
+  });
+
+  it("does not mark normal sessions as aborted", async () => {
+    process.env["CLAUDE_DIR"] = tmpDir;
+    const sessions = await getAllSessions();
+    const session = sessions.find((s) => s.entry.sessionId === "array-content-session");
+    expect(session).toBeDefined();
+    expect(session?.isAborted).toBe(false);
   });
 
   it("cleans up tmp dir after JSONL edge case tests", async () => {
