@@ -35,3 +35,7 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 
 # Claude Code worktrees
 .claude/worktrees/
+
+# Demo GIF output
+demo/*.gif
+demo/*.mp4
