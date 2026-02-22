@@ -20,28 +20,48 @@ Set CursorBlink false
 
 Type "csm list -v -n 10"
 Enter
-Sleep 4s
+Sleep 3s
 
 # ── Scene 2: Sort by size ─────────────────────────────────
 
 Type "csm list -s size -n 5"
 Enter
-Sleep 4s
+Sleep 3s
 
 # ── Scene 3: Search ───────────────────────────────────────
 
 Type "csm find 'refactor'"
 Enter
-Sleep 4s
+Sleep 3s
 
 # ── Scene 4: Stats ────────────────────────────────────────
 
 Type "csm stats"
 Enter
-Sleep 4s
+Sleep 3s
 
 # ── Scene 5: Stats by language ────────────────────────────
 
 Type "csm stats --by language"
 Enter
-Sleep 5s
+Sleep 3s
+
+# ── Scene 6: Interactive browse ───────────────────────────
+
+Type "csm browse"
+Enter
+Sleep 2s
+Down
+Sleep 500ms
+Down
+Sleep 500ms
+Down
+Sleep 500ms
+Down
+Sleep 500ms
+Up
+Sleep 500ms
+Up
+Sleep 3s
+Ctrl+C
+Sleep 1s
