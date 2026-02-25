@@ -308,14 +308,8 @@ async function parseJsonlSession(
   }
 
   const fileStat = await stat(filePath);
-  let usingBirthtimeFallback = false;
-  if (!firstTimestamp) usingBirthtimeFallback = true;
   const created = firstTimestamp ?? new Date(fileStat.birthtimeMs).toISOString();
   const modified = lastTimestamp ?? new Date(fileStat.mtimeMs).toISOString();
-
-  if (usingBirthtimeFallback) {
-    logWarn(`session ${sessionId}: no timestamps in JSONL, using file birthtime (may be unreliable)`);
-  }
 
   return {
     entry: {
