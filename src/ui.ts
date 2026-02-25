@@ -192,6 +192,7 @@ const WORKTREE_MARKER = "/.claude/worktrees/";
 
 /** Split a project path into base project name and optional worktree name. */
 export function parseProjectPath(path: string): { project: string; worktree?: string } {
+  if (!path) return { project: "unknown" };
   const idx = path.indexOf(WORKTREE_MARKER);
   if (idx !== -1) {
     return {

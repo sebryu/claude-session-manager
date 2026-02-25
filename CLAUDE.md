@@ -46,6 +46,13 @@ bun run src/index.ts browse -p myproj  # browse filtered by project
 
 All table columns (normal, verbose-table, verbose-card) are documented in [`docs/columns.md`](docs/columns.md).
 
+## Troubleshooting
+
+**"undefined is not an object" crash when listing sessions:**
+Claude Code's `sessions-index.json` files can contain incomplete entries (missing `projectPath`, `messageCount`, `created`, etc.). This happens when Claude Code writes a session to the index before fully populating it. The fix is in `sessions.ts` — the index-loading loop backfills missing fields with sensible defaults. If a new required field is added to `SessionEntry`, also add a fallback in the index-loading section of `getAllSessions()`.
+
+To find the broken session: `bun -e 'import {getAllSessions} from "./src/sessions.ts"; const s = await getAllSessions(); for (const x of s) { if (!x.entry.projectPath) console.log("BROKEN:", x.entry.sessionId, x.entry.fullPath) }' 2>/dev/null`
+
 ## Conventions
 
 - Use `node:fs/promises` and `node:path` for file operations (session discovery needs recursive dir reads)

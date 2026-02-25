@@ -391,6 +391,15 @@ export async function getAllSessions(
     if (index?.entries) {
       for (const entry of index.entries) {
         indexedIds.add(entry.sessionId);
+        // Fill in missing fields — some index entries are incomplete
+        if (!entry.projectPath) {
+          entry.projectPath = index.originalPath ?? ("/" + dirName.replace(/^-/, "").replace(/-/g, "/"));
+        }
+        if (!entry.firstPrompt) entry.firstPrompt = "No prompt";
+        if (!entry.messageCount) entry.messageCount = 0;
+        if (!entry.created) entry.created = new Date().toISOString();
+        if (!entry.modified) entry.modified = entry.created;
+        if (!entry.fileMtime) entry.fileMtime = Date.now();
         rawSessions.push({
           entry,
           jsonlPath: entry.fullPath,
