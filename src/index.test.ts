@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { parseSizeString, getSortFn, sessionTokens, sessionDuration } from "./index.ts";
+import { parseSizeString, getSortFn, sessionTokens, sessionDuration, termPageSize, FALLBACK_TERM_HEIGHT } from "./index.ts";
 import type { EnrichedSession, SessionEntry, SessionMeta } from "./sessions.ts";
 
 // ── Test helper ──────────────────────────────────────────────
@@ -228,5 +228,56 @@ describe("sessionDuration", () => {
   it("returns undefined when neither exists", () => {
     const s = makeTestSession({});
     expect(sessionDuration(s)).toBeUndefined();
+  });
+});
+
+// ── termPageSize ────────────────────────────────────────────
+
+describe("termPageSize", () => {
+  const origRows = process.stdout.rows;
+
+  function withRows(rows: number | undefined, fn: () => void) {
+    Object.defineProperty(process.stdout, "rows", { value: rows, configurable: true });
+    try {
+      fn();
+    } finally {
+      Object.defineProperty(process.stdout, "rows", { value: origRows, configurable: true });
+    }
+  }
+
+  it("uses terminal rows minus reserved (default 4)", () => {
+    withRows(40, () => {
+      expect(termPageSize()).toBe(36);
+    });
+  });
+
+  it("uses custom reserved value", () => {
+    withRows(40, () => {
+      expect(termPageSize(10)).toBe(30);
+    });
+  });
+
+  it("falls back to FALLBACK_TERM_HEIGHT when rows is undefined", () => {
+    withRows(undefined, () => {
+      expect(termPageSize()).toBe(FALLBACK_TERM_HEIGHT - 4);
+    });
+  });
+
+  it("returns minimum of 5 for very small terminals", () => {
+    withRows(6, () => {
+      expect(termPageSize()).toBe(5);
+    });
+  });
+
+  it("returns minimum of 5 when rows minus reserved would be less than 5", () => {
+    withRows(3, () => {
+      expect(termPageSize()).toBe(5);
+    });
+  });
+
+  it("handles large terminal heights", () => {
+    withRows(200, () => {
+      expect(termPageSize()).toBe(196);
+    });
   });
 });

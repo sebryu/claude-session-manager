@@ -42,9 +42,9 @@ import {
 // ── Constants ────────────────────────────────────────────────
 
 const FALLBACK_TERM_WIDTH = 120;
-const FALLBACK_TERM_HEIGHT = 24;
+export const FALLBACK_TERM_HEIGHT = 24;
 /** Compute pageSize for inquirer prompts so they fill the terminal height. Reserve lines for prompt chrome / header. */
-const termPageSize = (reserved = 4) =>
+export const termPageSize = (reserved = 4) =>
   Math.max(5, (process.stdout.rows ?? FALLBACK_TERM_HEIGHT) - reserved);
 const VALID_SORT_KEYS = ["date", "size", "tokens", "duration", "messages", "files-changed", "commits"];
 
