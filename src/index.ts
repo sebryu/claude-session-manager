@@ -42,6 +42,10 @@ import {
 // ── Constants ────────────────────────────────────────────────
 
 const FALLBACK_TERM_WIDTH = 120;
+export const FALLBACK_TERM_HEIGHT = 24;
+/** Compute pageSize for inquirer prompts so they fill the terminal height. Reserve lines for prompt chrome / header. */
+export const termPageSize = (reserved = 4) =>
+  Math.max(5, (process.stdout.rows ?? FALLBACK_TERM_HEIGHT) - reserved);
 const VALID_SORT_KEYS = ["date", "size", "tokens", "duration", "messages", "files-changed", "commits"];
 
 // ── Arg parsing ──────────────────────────────────────────────
@@ -1036,7 +1040,7 @@ async function cmdClean() {
     selected = await checkbox({
       message: "Select sessions to delete:",
       choices,
-      pageSize: 20,
+      pageSize: termPageSize(),
       loop: false,
     });
   } catch {
@@ -1148,7 +1152,7 @@ async function cmdInteractive() {
           { name: "Delete multiple sessions...", value: "__delete__" },
           { name: "Exit", value: "__exit__" },
         ],
-        pageSize: 25,
+        pageSize: termPageSize(),
         loop: false,
       });
     } catch {
@@ -1285,7 +1289,7 @@ async function interactiveBulkDelete(
     selected = await checkbox({
       message: "Select sessions to delete:",
       choices,
-      pageSize: 25,
+      pageSize: termPageSize(),
       loop: false,
     });
   } catch {
