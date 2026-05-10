@@ -4,6 +4,10 @@ import { writeFile, mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import {
   searchSessions,
+  searchSessionsScored,
+  searchSessionContent,
+  searchSessionsContent,
+  parseQuery,
   getAllSessions,
   getSessionLabel,
   deleteSession,
@@ -99,6 +103,136 @@ describe("searchSessions", () => {
     };
     const results = searchSessions([...sessions, sessionWithFacets], "oauth2");
     expect(results.some((r) => r.entry.sessionId === "fff")).toBe(true);
+  });
+
+  it("AND-search: + prefix requires the term", () => {
+    const s1 = makeSession({ sessionId: "and-1", firstPrompt: "tmux statusbar config" });
+    const s2 = makeSession({ sessionId: "and-2", firstPrompt: "tmux session restore" });
+    const both = searchSessions([s1, s2], "tmux +statusbar");
+    expect(both.map((r) => r.entry.sessionId)).toEqual(["and-1"]);
+  });
+
+  it("AND-search: missing required term excludes the session", () => {
+    const s1 = makeSession({ sessionId: "no-match", firstPrompt: "tmux config" });
+    expect(searchSessions([s1], "+statusbar")).toEqual([]);
+  });
+
+  it("--in field restricts the search surface", () => {
+    const s1 = makeSession({ sessionId: "title-only", customTitle: "tmux statusbar tweaks", firstPrompt: "irrelevant" });
+    const s2 = makeSession({ sessionId: "prompt-only", customTitle: "irrelevant", firstPrompt: "fix tmux statusbar" });
+    const titleHits = searchSessions([s1, s2], "statusbar", { field: "title" });
+    expect(titleHits.map((r) => r.entry.sessionId)).toEqual(["title-only"]);
+    const promptHits = searchSessions([s1, s2], "statusbar", { field: "first-prompt" });
+    expect(promptHits.map((r) => r.entry.sessionId)).toEqual(["prompt-only"]);
+  });
+
+  it("scored search returns numeric scores", () => {
+    const s1 = makeSession({ sessionId: "scored", firstPrompt: "tmux tmux statusbar" });
+    const scored = searchSessionsScored([s1], "tmux");
+    expect(scored.length).toBe(1);
+    expect(scored[0]?.score).toBeGreaterThan(0);
+  });
+});
+
+describe("parseQuery", () => {
+  it("splits required and optional terms", () => {
+    expect(parseQuery("tmux +statusbar config")).toEqual({
+      required: ["statusbar"],
+      optional: ["tmux", "config"],
+    });
+  });
+
+  it("ignores bare + tokens (must be glued to the term)", () => {
+    expect(parseQuery("+ tmux + statusbar")).toEqual({
+      required: [],
+      optional: ["tmux", "statusbar"],
+    });
+    expect(parseQuery("tmux +statusbar")).toEqual({
+      required: ["statusbar"],
+      optional: ["tmux"],
+    });
+  });
+
+  it("lowercases all terms", () => {
+    expect(parseQuery("Tmux +StatusBar")).toEqual({
+      required: ["statusbar"],
+      optional: ["tmux"],
+    });
+  });
+});
+
+describe("searchSessionContent", () => {
+  const tmpDir = join(tmpdir(), `csm-content-${Date.now()}`);
+
+  beforeAll(async () => {
+    await mkdir(tmpDir, { recursive: true });
+  });
+
+  it("finds plain text matches with snippets", async () => {
+    const file = join(tmpDir, "plain.jsonl");
+    await writeFile(
+      file,
+      [
+        JSON.stringify({ type: "user", message: { role: "user", content: "I want to set up tmux-resurrect for sessions" } }),
+        JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "Sure, install tmux-resurrect via tpm" }] } }),
+      ].join("\n"),
+    );
+    const matches = await searchSessionContent(file, "resurrect");
+    expect(matches.length).toBe(2);
+    expect(matches[0]?.lineNumber).toBe(1);
+    expect(matches[0]?.snippet.toLowerCase()).toContain("resurrect");
+    expect(matches[1]?.source).toBe("assistant");
+  });
+
+  it("walks nested tool_use input and tool_result content", async () => {
+    const file = join(tmpDir, "nested.jsonl");
+    await writeFile(
+      file,
+      [
+        JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "tool_use", input: { command: "grep tmux-resurrect /etc/tmux.conf" } }] } }),
+        JSON.stringify({ type: "user", message: { role: "user", content: [{ type: "tool_result", content: [{ type: "text", text: "tmux-resurrect installed" }] }] } }),
+      ].join("\n"),
+    );
+    const matches = await searchSessionContent(file, "resurrect");
+    expect(matches.length).toBe(2);
+  });
+
+  it("returns no matches when query absent", async () => {
+    const file = join(tmpDir, "empty.jsonl");
+    await writeFile(file, JSON.stringify({ type: "user", message: { content: "hello world" } }) + "\n");
+    const matches = await searchSessionContent(file, "absent");
+    expect(matches).toEqual([]);
+  });
+
+  it("respects max-matches cap", async () => {
+    const file = join(tmpDir, "many.jsonl");
+    const lines = Array.from({ length: 20 }, (_, i) =>
+      JSON.stringify({ type: "user", message: { content: `line ${i} mentions resurrect` } }),
+    );
+    await writeFile(file, lines.join("\n"));
+    const matches = await searchSessionContent(file, "resurrect", 3);
+    expect(matches.length).toBe(3);
+  });
+
+  it("aggregates and ranks across sessions", async () => {
+    const fileHigh = join(tmpDir, "high.jsonl");
+    const fileLow = join(tmpDir, "low.jsonl");
+    await writeFile(
+      fileHigh,
+      Array.from({ length: 5 }, () =>
+        JSON.stringify({ type: "user", message: { content: "needle" } }),
+      ).join("\n"),
+    );
+    await writeFile(
+      fileLow,
+      JSON.stringify({ type: "user", message: { content: "needle once" } }),
+    );
+    const sHigh = makeSession({ sessionId: "hi", fullPath: fileHigh });
+    const sLow = makeSession({ sessionId: "lo", fullPath: fileLow, modified: new Date(0).toISOString() });
+    const hits = await searchSessionsContent([sLow, sHigh], "needle");
+    expect(hits.length).toBe(2);
+    expect(hits[0]?.session.entry.sessionId).toBe("hi");
+    expect(hits[0]!.hitCount).toBeGreaterThan(hits[1]!.hitCount);
   });
 });
 

@@ -1,5 +1,14 @@
 import { describe, it, expect } from "bun:test";
-import { parseSizeString, getSortFn, sessionTokens, sessionDuration, termPageSize, FALLBACK_TERM_HEIGHT } from "./index.ts";
+import {
+  parseSizeString,
+  getSortFn,
+  sessionTokens,
+  sessionDuration,
+  termPageSize,
+  FALLBACK_TERM_HEIGHT,
+  parseDuration,
+  resolveResumeTarget,
+} from "./index.ts";
 import type { EnrichedSession, SessionEntry, SessionMeta } from "./sessions.ts";
 
 // ── Test helper ──────────────────────────────────────────────
@@ -278,6 +287,60 @@ describe("termPageSize", () => {
   it("handles large terminal heights", () => {
     withRows(200, () => {
       expect(termPageSize()).toBe(196);
+    });
+  });
+});
+
+// ── parseDuration ─────────────────────────────────────────────
+
+describe("parseDuration", () => {
+  it("parses minutes/hours/days/weeks", () => {
+    expect(parseDuration("30m")).toBe(30 * 60 * 1000);
+    expect(parseDuration("24h")).toBe(24 * 60 * 60 * 1000);
+    expect(parseDuration("7d")).toBe(7 * 24 * 60 * 60 * 1000);
+    expect(parseDuration("2w")).toBe(2 * 7 * 24 * 60 * 60 * 1000);
+  });
+
+  it("accepts decimals", () => {
+    expect(parseDuration("1.5h")).toBe(1.5 * 60 * 60 * 1000);
+  });
+
+  it("returns undefined for malformed input", () => {
+    expect(parseDuration("yesterday")).toBeUndefined();
+    expect(parseDuration("7days")).toBeUndefined();
+    expect(parseDuration("d7")).toBeUndefined();
+    expect(parseDuration("")).toBeUndefined();
+  });
+
+  it("is case-insensitive on the unit", () => {
+    expect(parseDuration("7D")).toBe(7 * 24 * 60 * 60 * 1000);
+  });
+});
+
+// ── resolveResumeTarget ───────────────────────────────────────
+
+describe("resolveResumeTarget", () => {
+  it("returns the project path as cwd when no worktree marker", () => {
+    expect(resolveResumeTarget("/Users/me/work/repo")).toEqual({
+      cwd: "/Users/me/work/repo",
+    });
+  });
+
+  it("strips worktree path and returns the base + worktree name", () => {
+    expect(
+      resolveResumeTarget("/Users/me/work/repo/.claude/worktrees/feature-x")
+    ).toEqual({
+      cwd: "/Users/me/work/repo",
+      worktree: "feature-x",
+    });
+  });
+
+  it("handles deeper worktree subpaths", () => {
+    expect(
+      resolveResumeTarget("/Users/me/work/repo/.claude/worktrees/feat/subdir")
+    ).toEqual({
+      cwd: "/Users/me/work/repo",
+      worktree: "feat/subdir",
     });
   });
 });

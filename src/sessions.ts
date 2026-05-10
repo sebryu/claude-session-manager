@@ -489,44 +489,306 @@ export function getSessionLabel(session: EnrichedSession): string {
   return session.entry.sessionId.slice(0, 8);
 }
 
-export function searchSessions(
-  sessions: EnrichedSession[],
-  query: string
-): EnrichedSession[] {
-  const terms = query.toLowerCase().split(/\s+/);
+/**
+ * Map a `--in <field>` value to the strings on a session it should match against.
+ */
+export type SearchField =
+  | "description"
+  | "title"
+  | "summary"
+  | "first-prompt"
+  | "branch"
+  | "project"
+  | "goal"
+  | "type";
 
-  const scored = sessions.map((s) => {
-    const searchable = [
-      s.entry.customTitle ?? "",
-      s.entry.summary ?? "",
-      s.entry.firstPrompt ?? "",
-      s.facets?.brief_summary ?? "",
-      s.facets?.underlying_goal ?? "",
-      s.facets?.session_type ?? "",
-      s.entry.projectPath ?? "",
-      s.entry.gitBranch ?? "",
-    ]
-      .join(" ")
-      .toLowerCase();
+export const SEARCH_FIELDS: SearchField[] = [
+  "description", "title", "summary", "first-prompt", "branch", "project", "goal", "type",
+];
+
+function fieldStrings(s: EnrichedSession, field: SearchField): string[] {
+  switch (field) {
+    case "title":        return [s.entry.customTitle ?? ""];
+    case "summary":      return [s.entry.summary ?? "", s.facets?.brief_summary ?? ""];
+    case "first-prompt": return [s.entry.firstPrompt ?? ""];
+    case "branch":       return [s.entry.gitBranch ?? ""];
+    case "project":      return [s.entry.projectPath ?? ""];
+    case "goal":         return [s.facets?.underlying_goal ?? ""];
+    case "type":         return [s.facets?.session_type ?? ""];
+    case "description":
+      return [
+        s.entry.customTitle ?? "",
+        s.entry.summary ?? "",
+        s.facets?.brief_summary ?? "",
+        s.facets?.underlying_goal ?? "",
+        s.entry.firstPrompt ?? "",
+      ];
+  }
+}
+
+/** Default: search across the full metadata surface (legacy behavior). */
+function defaultSearchable(s: EnrichedSession): string {
+  return [
+    s.entry.customTitle ?? "",
+    s.entry.summary ?? "",
+    s.entry.firstPrompt ?? "",
+    s.facets?.brief_summary ?? "",
+    s.facets?.underlying_goal ?? "",
+    s.facets?.session_type ?? "",
+    s.entry.projectPath ?? "",
+    s.entry.gitBranch ?? "",
+  ].join(" ").toLowerCase();
+}
+
+export interface ScoredSession {
+  session: EnrichedSession;
+  score: number;
+}
+
+export interface SearchOptions {
+  /** Restrict the search surface to a named field. */
+  field?: SearchField;
+}
+
+/**
+ * Parse a query into required terms (prefixed with `+`) and optional terms.
+ * Whitespace separates tokens. Case-insensitive.
+ */
+export function parseQuery(query: string): { required: string[]; optional: string[] } {
+  const required: string[] = [];
+  const optional: string[] = [];
+  for (const raw of query.toLowerCase().split(/\s+/)) {
+    const term = raw.trim();
+    if (!term || term === "+") continue;
+    if (term.startsWith("+")) {
+      required.push(term.slice(1));
+    } else {
+      optional.push(term);
+    }
+  }
+  return { required, optional };
+}
+
+export function searchSessionsScored(
+  sessions: EnrichedSession[],
+  query: string,
+  options: SearchOptions = {},
+): ScoredSession[] {
+  const { required, optional } = parseQuery(query);
+  const allTerms = [...required, ...optional];
+  if (allTerms.length === 0) return [];
+
+  const scored: ScoredSession[] = [];
+  for (const s of sessions) {
+    const searchable = options.field
+      ? fieldStrings(s, options.field).join(" ").toLowerCase()
+      : defaultSearchable(s);
+
+    // AND constraint: every required term must appear
+    let matchedAllRequired = true;
+    for (const term of required) {
+      if (!searchable.includes(term)) {
+        matchedAllRequired = false;
+        break;
+      }
+    }
+    if (!matchedAllRequired) continue;
 
     let score = 0;
-    for (const term of terms) {
+    for (const term of allTerms) {
       if (searchable.includes(term)) {
         score += 1;
-        // Bonus for exact word match
         if (searchable.includes(` ${term} `) || searchable.startsWith(`${term} `)) {
           score += SEARCH_WORD_BOUNDARY_BONUS;
         }
       }
     }
+    if (score > 0) scored.push({ session: s, score });
+  }
+  scored.sort((a, b) => b.score - a.score);
+  return scored;
+}
 
-    return { session: s, score };
+/** Backwards-compatible wrapper returning sessions only. */
+export function searchSessions(
+  sessions: EnrichedSession[],
+  query: string,
+  options: SearchOptions = {},
+): EnrichedSession[] {
+  return searchSessionsScored(sessions, query, options).map((s) => s.session);
+}
+
+// ── Content search (transcript grep) ──────────────────────────
+
+export interface ContentMatch {
+  /** First line number where the query matched (1-indexed JSONL line). */
+  lineNumber: number;
+  /** Snippet of text around the match (≤ ~120 chars). */
+  snippet: string;
+  /** Origin of the snippet: user / assistant / tool_use / tool_result */
+  source: string;
+}
+
+export interface ContentHit {
+  session: EnrichedSession;
+  matches: ContentMatch[];
+  hitCount: number;
+}
+
+const SNIPPET_RADIUS = 60;
+
+/**
+ * Recursively walk a content node and collect plain text strings.
+ *
+ * Handles known Anthropic shapes specially so each text block is tagged with
+ * the right source (tool_use / tool_result), then falls back to a generic
+ * walk of every value — that lets us pick up free-form fields like
+ * `tool_use.input.command` without enumerating every tool's input schema.
+ */
+function collectText(node: unknown, out: { source: string; text: string }[], source: string): void {
+  if (typeof node === "string") {
+    if (node) out.push({ source, text: node });
+    return;
+  }
+  if (!node || typeof node !== "object") return;
+  if (Array.isArray(node)) {
+    for (const item of node) collectText(item, out, source);
+    return;
+  }
+  const obj = node as Record<string, unknown>;
+  const type = obj["type"] as string | undefined;
+
+  if (type === "text" && typeof obj["text"] === "string") {
+    out.push({ source, text: obj["text"] as string });
+    return;
+  }
+  if (type === "tool_use") {
+    if (obj["input"] !== undefined) collectText(obj["input"], out, "tool_use");
+    return;
+  }
+  if (type === "tool_result") {
+    if (obj["content"] !== undefined) collectText(obj["content"], out, "tool_result");
+    return;
+  }
+  // Generic object: walk all string/array/object values. Skip the `type`
+  // discriminator and a few high-volume noise fields (ids/uuids).
+  for (const [key, value] of Object.entries(obj)) {
+    if (key === "type" || key === "id" || key === "uuid" || key === "model") continue;
+    collectText(value, out, source);
+  }
+}
+
+/** Build a snippet of ≤ 2*radius chars around the match position. */
+function makeSnippet(text: string, idx: number, queryLen: number, radius: number): string {
+  // Collapse whitespace so snippets don't span huge JSON blobs
+  const collapsed = text.replace(/\s+/g, " ");
+  // Re-find idx in collapsed text (best-effort; for whitespace-collapsed
+  // strings, idx may shift slightly, so fall back to first occurrence)
+  const lower = collapsed.toLowerCase();
+  const queryLower = text.slice(idx, idx + queryLen).toLowerCase();
+  const recomputed = lower.indexOf(queryLower);
+  const at = recomputed >= 0 ? recomputed : Math.min(idx, collapsed.length);
+  const start = Math.max(0, at - radius);
+  const end = Math.min(collapsed.length, at + queryLen + radius);
+  const prefix = start > 0 ? "…" : "";
+  const suffix = end < collapsed.length ? "…" : "";
+  return prefix + collapsed.slice(start, end) + suffix;
+}
+
+/**
+ * Stream-parse a session JSONL file and find lines containing the query.
+ * Returns matches with surrounding text snippets, capped at maxMatches.
+ */
+export async function searchSessionContent(
+  filePath: string,
+  query: string,
+  maxMatches = 5,
+): Promise<ContentMatch[]> {
+  const lower = query.toLowerCase();
+  const matches: ContentMatch[] = [];
+  let lineNum = 0;
+
+  try {
+    const rl = createInterface({
+      input: createReadStream(filePath),
+      crlfDelay: Infinity,
+    });
+
+    for await (const line of rl) {
+      lineNum++;
+      if (matches.length >= maxMatches) break;
+      if (!line.trim()) continue;
+
+      let obj: Record<string, unknown>;
+      try {
+        obj = JSON.parse(line) as Record<string, unknown>;
+      } catch {
+        continue;
+      }
+
+      const type = (obj["type"] as string | undefined) ?? "";
+      const message = obj["message"] as Record<string, unknown> | undefined;
+      const role = (message?.["role"] ?? obj["role"]) as string | undefined;
+      const baseSource = role || type || "msg";
+
+      const texts: { source: string; text: string }[] = [];
+      // Walk both top-level and nested message.content
+      if (message?.["content"] !== undefined) collectText(message["content"], texts, baseSource);
+      if (obj["content"] !== undefined) collectText(obj["content"], texts, baseSource);
+
+      for (const { source, text } of texts) {
+        const idx = text.toLowerCase().indexOf(lower);
+        if (idx === -1) continue;
+        matches.push({
+          lineNumber: lineNum,
+          snippet: makeSnippet(text, idx, query.length, SNIPPET_RADIUS),
+          source,
+        });
+        if (matches.length >= maxMatches) break;
+      }
+    }
+  } catch (err) {
+    logDebug(`content search failed for ${filePath}: ${String(err)}`);
+  }
+
+  return matches;
+}
+
+/**
+ * Run content search across many sessions in parallel-bounded chunks.
+ * Returns hits sorted by (hit count desc, modified desc).
+ */
+export async function searchSessionsContent(
+  sessions: EnrichedSession[],
+  query: string,
+  options: { perSessionLimit?: number; concurrency?: number } = {},
+): Promise<ContentHit[]> {
+  const perSessionLimit = options.perSessionLimit ?? 5;
+  const concurrency = options.concurrency ?? 16;
+
+  const hits: ContentHit[] = [];
+  let cursor = 0;
+
+  async function worker(): Promise<void> {
+    while (true) {
+      const i = cursor++;
+      if (i >= sessions.length) return;
+      const s = sessions[i]!;
+      const matches = await searchSessionContent(s.entry.fullPath, query, perSessionLimit);
+      if (matches.length > 0) {
+        hits.push({ session: s, matches, hitCount: matches.length });
+      }
+    }
+  }
+
+  const workers = Array.from({ length: Math.min(concurrency, sessions.length) }, () => worker());
+  await Promise.all(workers);
+
+  hits.sort((a, b) => {
+    if (b.hitCount !== a.hitCount) return b.hitCount - a.hitCount;
+    return new Date(b.session.entry.modified).getTime() - new Date(a.session.entry.modified).getTime();
   });
-
-  return scored
-    .filter((s) => s.score > 0)
-    .sort((a, b) => b.score - a.score)
-    .map((s) => s.session);
+  return hits;
 }
 
 export async function deleteSession(session: EnrichedSession): Promise<void> {

@@ -16,8 +16,6 @@ import {
   c,
   formatDate,
   relativeDate,
-  parseProjectPath,
-  formatLines,
   formatFeatureFlags,
   formatOutcome,
   formatSessionType,
